@@ -45,6 +45,10 @@ deno task start
 4. For decoding: Enter the password if used during encoding
 5. Download your encoded image or extracted data
 
+## Future Plans
+
+- **Lossy Format Support**: Add steganography support for JPEG and other lossy formats using DCT (Discrete Cosine Transform) domain embedding, allowing data to survive re-compression
+
 ## Technical Details
 
 Built with:
