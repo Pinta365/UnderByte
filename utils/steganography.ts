@@ -142,7 +142,6 @@ export function embedLSB(
   }
 
   const result = new Uint8Array(imageData);
-  const bitsPerPixel = 3 * bitDepth; // RGB channels, skip alpha
   const maxBits = Math.floor((imageData.length / 4) * 3) * bitDepth;
 
   if (messageBits.length > maxBits) {

@@ -6,14 +6,17 @@
 
 **LSB Steganography Web Application**
 
-UnderByte is a web-based tool for hiding messages and files inside images using Least Significant Bit (LSB) steganography. Encode text or files into lossless image formats with optional password encryption.
+UnderByte is a web-based tool for hiding messages and files inside images using
+Least Significant Bit (LSB) steganography. Encode text or files into lossless
+image formats with optional password encryption.
 
 ## Features
 
 - **Encode & Decode**: Hide text messages or files within images
 - **Password Protection**: Optional XOR encryption for your hidden data
 - **Multiple Formats**: Supports PNG, WebP, GIF, BMP, TIFF, APNG, and more
-- **Adjustable Bit Depth**: Control visibility vs capacity (1-4 bits per channel)
+- **Adjustable Bit Depth**: Control visibility vs capacity (1-4 bits per
+  channel)
 - **Real-time Statistics**: View LSB distribution and modification statistics
 
 ## Getting Started
@@ -47,11 +50,14 @@ deno task start
 
 ## Future Plans
 
-- **Lossy Format Support**: Add steganography support for JPEG and other lossy formats using DCT (Discrete Cosine Transform) domain embedding, allowing data to survive re-compression
+- **Lossy Format Support**: Add steganography support for JPEG and other lossy
+  formats using DCT (Discrete Cosine Transform) domain embedding, allowing data
+  to survive re-compression
 
 ## Technical Details
 
 Built with:
+
 - [Fresh](https://fresh.deno.dev/) - Deno web framework
 - [@cross/image](https://jsr.io/@cross/image) - Pure JavaScript image processing
 - Preact & Signals - Reactive UI framework
