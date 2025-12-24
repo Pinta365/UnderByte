@@ -1,17 +1,53 @@
-# Fresh project
+# UnderByte
 
-Your new Fresh project is ready to go. You can follow the Fresh "Getting
-Started" guide here: https://fresh.deno.dev/docs/getting-started
+<div align="center">
+  <img src="static/logo.png" alt="UnderByte Logo" width="200">
+</div>
 
-### Usage
+**LSB Steganography Web Application**
 
-Make sure to install Deno:
-https://docs.deno.com/runtime/getting_started/installation
+UnderByte is a web-based tool for hiding messages and files inside images using Least Significant Bit (LSB) steganography. Encode text or files into lossless image formats with optional password encryption.
 
-Then start the project in development mode:
+## Features
 
-```
+- **Encode & Decode**: Hide text messages or files within images
+- **Password Protection**: Optional XOR encryption for your hidden data
+- **Multiple Formats**: Supports PNG, WebP, GIF, BMP, TIFF, APNG, and more
+- **Adjustable Bit Depth**: Control visibility vs capacity (1-4 bits per channel)
+- **Real-time Statistics**: View LSB distribution and modification statistics
+
+## Getting Started
+
+### Prerequisites
+
+- [Deno](https://docs.deno.com/runtime/getting_started/installation) installed
+
+### Development
+
+```bash
 deno task dev
 ```
 
-This will watch the project directory and restart as necessary.
+The application will be available at `http://localhost:5173`
+
+### Build
+
+```bash
+deno task build
+deno task start
+```
+
+## Usage
+
+1. Upload an image (lossless formats recommended)
+2. Choose Encode or Decode
+3. For encoding: Enter your message or select a file, optionally set a password
+4. For decoding: Enter the password if used during encoding
+5. Download your encoded image or extracted data
+
+## Technical Details
+
+Built with:
+- [Fresh](https://fresh.deno.dev/) - Deno web framework
+- [@cross/image](https://jsr.io/@cross/image) - Pure JavaScript image processing
+- Preact & Signals - Reactive UI framework
