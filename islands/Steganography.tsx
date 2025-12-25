@@ -40,7 +40,11 @@ interface ImageState {
   rawJpegData?: Uint8Array;
 }
 
-export default function Steganography() {
+interface Props {
+  onBack?: () => void;
+}
+
+export default function Steganography({ onBack }: Props) {
   const originalImage = useSignal<ImageState | null>(null);
   const encodedImage = useSignal<ImageState | null>(null);
   const lsbStats = useSignal<
@@ -719,12 +723,13 @@ export default function Steganography() {
         <div class="space-y-6">
           <div class="border border-slate-800 rounded-lg p-6 bg-black/50">
             <div class="mb-6 flex justify-center">
-              <img
-                src="/logo.png"
-                alt="UnderByte"
-                class="h-32 md:h-48 w-auto border-2 border-emerald-800/50 rounded-xl shadow-2xl shadow-emerald-900/50 bg-linear-to-br from-slate-900/80 to-slate-950/80 p-3 md:p-4 backdrop-blur-sm"
-              />
+              <div class="h-32 md:h-48 w-auto flex items-center justify-center border-2 border-emerald-800/50 rounded-xl shadow-2xl shadow-emerald-900/50 bg-linear-to-br from-slate-900/80 to-slate-950/80 p-3 md:p-6 backdrop-blur-sm">
+                <span class="text-4xl md:text-6xl">🖼️</span>
+              </div>
             </div>
+            <h2 class="text-xl text-emerald-400 font-bold mb-3 text-center">
+              Image Steganography
+            </h2>
             <p class="text-slate-300 mb-4 leading-relaxed">
               Hide secret messages and files inside images using advanced
               steganography techniques. Your data is embedded invisibly using
@@ -752,6 +757,16 @@ export default function Steganography() {
               <p>• Optional XOR encryption for additional security</p>
             </div>
           </div>
+
+          {onBack && (
+            <button
+              type="button"
+              onClick={onBack}
+              class="w-full px-4 py-2 text-slate-500 hover:text-slate-400 text-sm"
+            >
+              ← Back to mode selection
+            </button>
+          )}
 
           <div class="border border-slate-800 rounded-lg p-4 bg-black/50">
             <h3 class="text-xs uppercase tracking-widest text-slate-500 mb-2">

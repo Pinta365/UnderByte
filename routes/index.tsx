@@ -1,12 +1,12 @@
 import { Head } from "fresh/runtime";
 import { define } from "../utils.ts";
-import Steganography from "../islands/Steganography.tsx";
+import ModePicker from "../islands/ModePicker.tsx";
 
 export default define.page(function Home() {
   return (
     <div class="min-h-screen bg-slate-950 text-emerald-500 font-mono relative">
       <Head>
-        <title>UnderByte - Steganography</title>
+        <title>UnderByte - Steganography Toolkit</title>
       </Head>
       <div class="fixed top-4 right-4 z-50 flex items-center gap-3">
         <span class="px-2 py-1 text-[10px] uppercase tracking-wider font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-full">
@@ -29,8 +29,8 @@ export default define.page(function Home() {
           </svg>
         </a>
       </div>
-      <div class="container mx-auto px-4 py-8">
-        <Steganography />
+      <div class="container mx-auto px-4 py-12">
+        <ModePicker />
       </div>
     </div>
   );
