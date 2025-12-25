@@ -1,15 +1,21 @@
 import { useComputed, useSignal } from "@preact/signals";
 import { useEffect, useRef } from "preact/hooks";
-import { Image } from "@cross/image";
+import { Image, type JPEGQuantizedCoefficients } from "@cross/image";
 import {
   bitsToBytes,
   bytesToBits,
   calculateBitCapacity,
+  calculateJpegCoefficientCapacity,
+  cloneJpegCoefficients,
   detectImageFormat,
+  embedInCoefficients,
   embedLSB,
+  encodeJpegFromCoefficients,
+  extractFromCoefficients,
+  extractJpegCoefficients,
   extractLSB,
+  generateJpegCoefficientStats,
   generateLSBStats,
-  getRecommendedOutputFormat,
   isLossyFormat,
   parseFileHeader,
   prepareFileHeader,
@@ -24,10 +30,11 @@ interface ImageState {
   originalFormat?: string | null;
   originalFileName?: string;
   originalImage?: Image; // Store original Image instance to preserve metadata
+  jpegCoefficients?: JPEGQuantizedCoefficients;
+  rawJpegData?: Uint8Array;
 }
 
 export default function Steganography() {
-  // State signals
   const originalImage = useSignal<ImageState | null>(null);
   const encodedImage = useSignal<ImageState | null>(null);
   const lsbStats = useSignal<
@@ -54,30 +61,63 @@ export default function Steganography() {
     | "ppm"
     | "pam"
     | "ico"
+    | "jpeg"
   >("png");
-  const bitDepth = useSignal<number>(1); // 1-4 bits per byte
-  const _jpegQuality = useSignal<number>(98); // JPEG quality (85-100) - Reserved for future JPEG support
+  const bitDepth = useSignal<number>(1);
+  const useChroma = useSignal<boolean>(true);
+  const jpegCoefficientStats = useSignal<
+    {
+      luminance: { ones: number; zeros: number; total: number };
+      chroma: { ones: number; zeros: number; total: number };
+      total: { ones: number; zeros: number; usable: number };
+    } | null
+  >(null);
   const operationMode = useSignal<"initial" | "encode" | "decode">("initial");
+  const isLoading = useSignal<boolean>(false);
+  const loadingMessage = useSignal<string | null>(null);
 
-  // Canvas refs
+  function resetSession() {
+    originalImage.value = null;
+    encodedImage.value = null;
+    lsbStats.value = null;
+    message.value = "";
+    password.value = "";
+    mode.value = "text";
+    fileInput.value = null;
+    error.value = null;
+    formatWarning.value = null;
+    outputFormat.value = "png";
+    bitDepth.value = 1;
+    useChroma.value = true;
+    jpegCoefficientStats.value = null;
+    operationMode.value = "initial";
+    isLoading.value = false;
+    loadingMessage.value = null;
+  }
+
   const originalCanvasRef = useRef<HTMLCanvasElement>(null);
   const encodedCanvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Computed values
   const bitCapacity = useComputed(() => {
     if (!originalImage.value) return 0;
 
-    // For JPEG, show warning (lossy format)
-    // Actual capacity will be calculated during encoding
+    if (
+      originalImage.value.originalFormat === "jpeg" &&
+      originalImage.value.jpegCoefficients
+    ) {
+      return calculateJpegCoefficientCapacity(
+        originalImage.value.jpegCoefficients,
+        useChroma.value,
+      );
+    }
+
     if (originalImage.value.originalFormat === "jpeg") {
       const estimatedCapacity = Math.floor(
-        (originalImage.value.width * originalImage.value.height * 0.12 *
-          bitDepth.value) / 8,
+        (originalImage.value.width * originalImage.value.height * 0.12) / 8,
       );
       return estimatedCapacity;
     }
 
-    // For lossless formats, use pixel capacity
     return calculateBitCapacity(
       originalImage.value.width,
       originalImage.value.height,
@@ -102,7 +142,6 @@ export default function Steganography() {
     messageSize.value > bitCapacity.value
   );
 
-  // Render image data to canvas
   function renderToCanvas(
     canvas: HTMLCanvasElement | null,
     imageData: ImageState | Uint8Array | null,
@@ -117,7 +156,6 @@ export default function Steganography() {
     let height: number;
 
     if (imageData instanceof Uint8Array) {
-      // Bit-Sieve visualization
       if (!originalImage.value) return;
       width = originalImage.value.width;
       height = originalImage.value.height;
@@ -140,7 +178,6 @@ export default function Steganography() {
     ctx.putImageData(imageDataObj, 0, 0);
   }
 
-  // Update canvases when data changes
   useEffect(() => {
     renderToCanvas(originalCanvasRef.current, originalImage.value);
   }, [originalImage.value]);
@@ -149,29 +186,41 @@ export default function Steganography() {
     renderToCanvas(encodedCanvasRef.current, encodedImage.value);
   }, [encodedImage.value]);
 
-  // Handle image upload
   async function handleImageUpload(file: File) {
+    isLoading.value = true;
+    loadingMessage.value = "Loading image...";
+
     try {
       error.value = null;
       formatWarning.value = null;
+      jpegCoefficientStats.value = null;
       const arrayBuffer = await file.arrayBuffer();
       const imageData = new Uint8Array(arrayBuffer);
 
-      // Detect original format using @cross/image's format detection
       const detectedFormat = detectImageFormat(imageData);
       const isLossy = isLossyFormat(detectedFormat);
 
-      if (isLossy && detectedFormat !== "jpeg") {
-        const recommendation = getRecommendedOutputFormat(detectedFormat);
-        formatWarning.value = `⚠️ ${recommendation.reason}`;
-      } else if (detectedFormat === "jpeg") {
-        formatWarning.value =
-          "⚠️ JPEG is a lossy format. LSB steganography will not work reliably. Please use a lossless format like PNG.";
+      let jpegCoefficients: JPEGQuantizedCoefficients | undefined;
+
+      if (detectedFormat === "jpeg") {
+        loadingMessage.value = "Extracting JPEG coefficients...";
+        const coeffs = await extractJpegCoefficients(imageData);
+        if (coeffs) {
+          jpegCoefficients = coeffs;
+          jpegCoefficientStats.value = generateJpegCoefficientStats(coeffs);
+          outputFormat.value = "jpeg";
+        } else {
+          formatWarning.value =
+            "⚠️ JPEG detected but coefficient extraction failed. Cannot use JPEG steganography.";
+        }
+      } else if (isLossy) {
+        formatWarning.value = `⚠️ ${
+          detectedFormat?.toUpperCase() || "Unknown"
+        } is a lossy format. Saving as PNG to preserve hidden data.`;
       }
 
       const image = await Image.decode(imageData);
 
-      // Extract filename without extension
       const fileNameWithoutExt = file.name.replace(/\.[^/.]+$/, "");
 
       const state: ImageState = {
@@ -180,12 +229,13 @@ export default function Steganography() {
         data: new Uint8Array(image.data),
         originalFormat: detectedFormat,
         originalFileName: fileNameWithoutExt,
+        jpegCoefficients,
+        rawJpegData: detectedFormat === "jpeg" ? imageData : undefined,
       };
 
       originalImage.value = state;
       encodedImage.value = null;
 
-      // Set output format to match input format if it's lossless
       if (detectedFormat && !isLossyFormat(detectedFormat)) {
         const losslessFormats = [
           "png",
@@ -206,15 +256,22 @@ export default function Steganography() {
       error.value = `Failed to load image: ${
         err instanceof Error ? err.message : String(err)
       }`;
+    } finally {
+      isLoading.value = false;
+      loadingMessage.value = null;
     }
   }
 
-  // Handle encode
   async function handleEncode() {
     if (!originalImage.value) {
       error.value = "Please upload an image first";
       return;
     }
+
+    isLoading.value = true;
+    loadingMessage.value = originalImage.value.originalFormat === "jpeg"
+      ? "Processing JPEG coefficients..."
+      : "Encoding message...";
 
     try {
       error.value = null;
@@ -227,11 +284,9 @@ export default function Steganography() {
           return;
         }
         const textBytes = new TextEncoder().encode(message.value);
-        // Add length prefix (4 bytes, little-endian) so we know exactly how many bytes to extract
         const lengthPrefix = new Uint8Array(4);
         const view = new DataView(lengthPrefix.buffer);
-        view.setUint32(0, textBytes.length, true); // little-endian
-        // Combine length prefix + text
+        view.setUint32(0, textBytes.length, true);
         dataToEncode = new Uint8Array(4 + textBytes.length);
         dataToEncode.set(lengthPrefix);
         dataToEncode.set(textBytes, 4);
@@ -242,31 +297,17 @@ export default function Steganography() {
         }
         const fileData = new Uint8Array(await fileInput.value.arrayBuffer());
         const header = prepareFileHeader(fileInput.value.name, fileData.length);
-        // Combine header + file data
         dataToEncode = new Uint8Array(header.length + fileData.length);
         dataToEncode.set(header);
         dataToEncode.set(fileData, header.length);
       }
 
-      // XOR encrypt
       const encrypted = password.value
         ? xorEncrypt(dataToEncode, password.value)
         : dataToEncode;
 
-      // Convert to bits
       const bits = bytesToBits(encrypted);
 
-      // Check if this is a lossy format - show error
-      const originalFormat = originalImage.value.originalFormat ?? null;
-      if (isLossyFormat(originalFormat)) {
-        error.value = `Cannot encode into lossy format (${
-          originalFormat?.toUpperCase() || "unknown"
-        }). Please use a lossless format like PNG, WebP lossless, or BMP.`;
-        return;
-      }
-
-      // Use pixel-domain LSB steganography for lossless formats
-      // Check capacity
       const requiredBytes = dataToEncode.length;
       if (requiredBytes > bitCapacity.value) {
         error.value =
@@ -274,81 +315,125 @@ export default function Steganography() {
         return;
       }
 
-      // Embed into image with selected bit depth
-      const embeddedData = embedLSB(
-        originalImage.value.data,
-        bits,
-        bitDepth.value,
-      );
+      const originalFormat = originalImage.value.originalFormat ?? null;
 
-      // Create new image state
-      encodedImage.value = {
-        width: originalImage.value.width,
-        height: originalImage.value.height,
-        data: embeddedData,
-        originalFormat: originalImage.value.originalFormat,
-        originalFileName: originalImage.value.originalFileName,
-      };
+      if (originalFormat === "jpeg" && originalImage.value.jpegCoefficients) {
+        const coeffs = cloneJpegCoefficients(
+          originalImage.value.jpegCoefficients,
+        );
 
-      // Generate statistics (replaced bit-sieve visualization with histogram)
-      // Compare with original to show how many bits were actually changed
-      lsbStats.value = generateLSBStats(
-        embeddedData,
-        originalImage.value.data,
-      );
+        embedInCoefficients(coeffs, bits, useChroma.value);
+
+        const encodedJpegData = await encodeJpegFromCoefficients(coeffs);
+
+        const encodedImage_ = await Image.decode(encodedJpegData);
+
+        encodedImage.value = {
+          width: encodedImage_.width,
+          height: encodedImage_.height,
+          data: new Uint8Array(encodedImage_.data),
+          originalFormat: "jpeg",
+          originalFileName: originalImage.value.originalFileName,
+          jpegCoefficients: coeffs,
+          rawJpegData: encodedJpegData,
+        };
+
+        jpegCoefficientStats.value = generateJpegCoefficientStats(coeffs);
+        lsbStats.value = null;
+      } else if (isLossyFormat(originalFormat)) {
+        error.value = `Cannot encode into lossy format (${
+          originalFormat?.toUpperCase() || "unknown"
+        }). Please use a lossless format like PNG, WebP lossless, or BMP.`;
+        return;
+      } else {
+        const embeddedData = embedLSB(
+          originalImage.value.data,
+          bits,
+          bitDepth.value,
+        );
+
+        encodedImage.value = {
+          width: originalImage.value.width,
+          height: originalImage.value.height,
+          data: embeddedData,
+          originalFormat: originalImage.value.originalFormat,
+          originalFileName: originalImage.value.originalFileName,
+        };
+
+        lsbStats.value = generateLSBStats(
+          embeddedData,
+          originalImage.value.data,
+        );
+        jpegCoefficientStats.value = null;
+      }
     } catch (err) {
       error.value = `Encoding failed: ${
         err instanceof Error ? err.message : String(err)
       }`;
+    } finally {
+      isLoading.value = false;
+      loadingMessage.value = null;
     }
   }
 
-  // Handle decode
   function handleDecode() {
-    // Set operation mode to decode
     if (operationMode.value !== "decode") {
       operationMode.value = "decode";
     }
-    // Allow decoding from either encoded image or original (in case user uploads an already-encoded image)
     const imageToDecode = encodedImage.value || originalImage.value;
     if (!imageToDecode) {
       error.value = "Please upload an image to decode";
       return;
     }
 
+    isLoading.value = true;
+    loadingMessage.value = imageToDecode.originalFormat === "jpeg"
+      ? "Extracting from JPEG coefficients..."
+      : "Decoding message...";
+
     try {
       error.value = null;
 
-      // Check if this is a lossy format - show error
       const decodeFormat = imageToDecode.originalFormat ?? null;
-      if (isLossyFormat(decodeFormat)) {
+      let extractedBits: Uint8Array;
+
+      if (decodeFormat === "jpeg" && imageToDecode.jpegCoefficients) {
+        const capacity = calculateJpegCoefficientCapacity(
+          imageToDecode.jpegCoefficients,
+          useChroma.value,
+        );
+        const maxBits = capacity * 8;
+
+        extractedBits = extractFromCoefficients(
+          imageToDecode.jpegCoefficients,
+          maxBits,
+          useChroma.value,
+        );
+      } else if (
+        isLossyFormat(decodeFormat) && !imageToDecode.jpegCoefficients
+      ) {
         error.value = `Cannot decode from lossy format (${
           decodeFormat?.toUpperCase() || "unknown"
-        }). Lossy compression destroys LSB data. Please use a lossless format.`;
+        }). Lossy compression destroys pixel-domain embedding data. Please use a lossless format or a JPEG with coefficient extraction.`;
         return;
+      } else {
+        const maxBits = Math.floor((imageToDecode.data.length / 4) * 3) *
+          bitDepth.value;
+        extractedBits = extractLSB(
+          imageToDecode.data,
+          maxBits,
+          bitDepth.value,
+        );
       }
 
-      // Use pixel-domain LSB extraction for lossless formats
-      const maxBits = Math.floor((imageToDecode.data.length / 4) * 3) *
-        bitDepth.value;
-      const extractedBits = extractLSB(
-        imageToDecode.data,
-        maxBits,
-        bitDepth.value,
-      );
-
-      // Convert to bytes
       const encryptedBytes = bitsToBytes(extractedBits);
 
-      // Try to decrypt
       const decryptedBytes = password.value
         ? xorDecrypt(encryptedBytes, password.value)
         : encryptedBytes;
 
-      // Try to parse as file header first (magic byte 0x55)
       const header = parseFileHeader(decryptedBytes);
       if (header) {
-        // It's a file! Extract exactly the file size
         if (decryptedBytes.length < header.payloadOffset + header.fileSize) {
           error.value = "File appears to be truncated or corrupted";
           return;
@@ -374,28 +459,24 @@ export default function Steganography() {
         return;
       }
 
-      // Otherwise, parse as text with length prefix
       if (decryptedBytes.length < 4) {
         error.value =
-          "Data too short to decode. Make sure the bit depth and password match the encoding settings.";
+          "Data too short to decode. Make sure the settings match the encoding settings.";
         return;
       }
 
-      // Read length prefix (first 4 bytes, little-endian)
       const view = new DataView(
         decryptedBytes.buffer,
         decryptedBytes.byteOffset,
       );
-      const textLength = view.getUint32(0, true); // little-endian
+      const textLength = view.getUint32(0, true);
 
-      // Validate length
       if (textLength > decryptedBytes.length - 4 || textLength > 1000000) {
         error.value =
-          "Invalid message length. Make sure the bit depth and password match the encoding settings.";
+          "Invalid message length. Make sure the settings match the encoding settings.";
         return;
       }
 
-      // Extract exactly the specified length
       const textBytes = decryptedBytes.slice(4, 4 + textLength);
       try {
         const text = new TextDecoder("utf-8", { fatal: false }).decode(
@@ -405,162 +486,156 @@ export default function Steganography() {
         mode.value = "text";
       } catch {
         error.value =
-          "Failed to decode text. The data may be corrupted or the password/bit depth may be incorrect.";
+          "Failed to decode text. The data may be corrupted or the password may be incorrect.";
       }
     } catch (err) {
       error.value = `Decoding failed: ${
         err instanceof Error ? err.message : String(err)
-      }. Make sure the bit depth and password match the encoding settings.`;
+      }. Make sure the settings match the encoding settings.`;
+    } finally {
+      isLoading.value = false;
+      loadingMessage.value = null;
     }
   }
 
-  // Handle download
   async function handleDownload() {
     if (!encodedImage.value) {
       error.value = "No encoded image to download";
       return;
     }
 
+    isLoading.value = true;
+    loadingMessage.value = "Preparing download...";
+
     try {
       error.value = null;
 
-      // Encode from pixel data (lossless formats only)
-      // Create Image instance from encoded data
-      const image = Image.fromRGBA(
-        encodedImage.value.width,
-        encodedImage.value.height,
-        encodedImage.value.data,
-      );
-
-      // Use user-selected output format
       const selectedFormat = outputFormat.value;
-
-      // Try to preserve original format if it's lossless and user selected PNG
-      const originalFormat = originalImage.value?.originalFormat;
       let finalFormat: string = selectedFormat;
-
-      // If original format is lossless and user selected PNG, use original format
-      if (
-        originalFormat && !isLossyFormat(originalFormat) &&
-        selectedFormat === "png"
-      ) {
-        const losslessFormats = [
-          "png",
-          "gif",
-          "apng",
-          "bmp",
-          "tiff",
-          "ppm",
-          "pam",
-          "ico",
-        ];
-        if (losslessFormats.includes(originalFormat)) {
-          finalFormat = originalFormat;
-        }
-      }
-
-      // Encode with appropriate settings
       let encodedData: Uint8Array;
 
-      if (finalFormat === "png") {
-        // PNG: Use balanced compression (level 6, default) to match typical PNG files
-        encodedData = await image.encode("png", { compressionLevel: 6 });
-      } else if (finalFormat === "webp") {
-        // WebP: lossless mode
-        try {
-          encodedData = await image.encode("webp", {
-            lossless: true,
-            quality: 100,
-          });
-        } catch (err) {
-          // Fallback to PNG if WebP encoding fails
-          console.warn("WebP encoding failed, falling back to PNG:", err);
-          encodedData = await image.encode("png", { compressionLevel: 6 });
-          finalFormat = "png";
-          error.value = "WebP encoding failed, saved as PNG instead";
-        }
-      } else if (finalFormat === "gif") {
-        // GIF: Encode as GIF (lossless)
-        try {
-          encodedData = await image.encode("gif");
-        } catch (err) {
-          console.warn("GIF encoding failed, falling back to PNG:", err);
-          encodedData = await image.encode("png", { compressionLevel: 6 });
-          finalFormat = "png";
-          error.value = "GIF encoding failed, saved as PNG instead";
-        }
-      } else if (finalFormat === "bmp") {
-        // BMP: Encode as BMP (lossless, uncompressed)
-        try {
-          encodedData = await image.encode("bmp");
-        } catch (err) {
-          console.warn("BMP encoding failed, falling back to PNG:", err);
-          encodedData = await image.encode("png", { compressionLevel: 6 });
-          finalFormat = "png";
-          error.value = "BMP encoding failed, saved as PNG instead";
-        }
-      } else if (finalFormat === "apng") {
-        // APNG: Animated PNG (lossless)
-        try {
-          encodedData = await image.encode("apng", { compressionLevel: 6 });
-        } catch (err) {
-          console.warn("APNG encoding failed, falling back to PNG:", err);
-          encodedData = await image.encode("png", { compressionLevel: 6 });
-          finalFormat = "png";
-          error.value = "APNG encoding failed, saved as PNG instead";
-        }
-      } else if (finalFormat === "tiff") {
-        // TIFF: Encode with LZW compression (lossless, matches typical TIFF compression)
-        try {
-          encodedData = await image.encode("tiff", { compression: "lzw" });
-        } catch (err) {
-          console.warn("TIFF encoding failed, falling back to PNG:", err);
-          encodedData = await image.encode("png", { compressionLevel: 6 });
-          finalFormat = "png";
-          error.value = "TIFF encoding failed, saved as PNG instead";
-        }
-      } else if (finalFormat === "ppm") {
-        // PPM: Netpbm format (lossless, uncompressed)
-        try {
-          encodedData = await image.encode("ppm");
-        } catch (err) {
-          console.warn("PPM encoding failed, falling back to PNG:", err);
-          encodedData = await image.encode("png", { compressionLevel: 6 });
-          finalFormat = "png";
-          error.value = "PPM encoding failed, saved as PNG instead";
-        }
-      } else if (finalFormat === "pam") {
-        // PAM: Netpbm format with better transparency (lossless)
-        try {
-          encodedData = await image.encode("pam");
-        } catch (err) {
-          console.warn("PAM encoding failed, falling back to PNG:", err);
-          encodedData = await image.encode("png", { compressionLevel: 6 });
-          finalFormat = "png";
-          error.value = "PAM encoding failed, saved as PNG instead";
-        }
-      } else if (finalFormat === "ico") {
-        // ICO: Windows icon format (lossless, limited capacity)
-        try {
-          encodedData = await image.encode("ico");
-        } catch (err) {
-          console.warn("ICO encoding failed, falling back to PNG:", err);
-          encodedData = await image.encode("png", { compressionLevel: 6 });
-          finalFormat = "png";
-          error.value = "ICO encoding failed, saved as PNG instead";
-        }
+      if (selectedFormat === "jpeg" && encodedImage.value.rawJpegData) {
+        encodedData = encodedImage.value.rawJpegData;
+        finalFormat = "jpeg";
+      } else if (selectedFormat === "jpeg" && !encodedImage.value.rawJpegData) {
+        error.value =
+          "JPEG output requires coefficient-domain encoding. Please re-encode from a JPEG source.";
+        return;
       } else {
-        // Fallback to PNG for unknown formats
-        encodedData = await image.encode("png", { compressionLevel: 6 });
-        finalFormat = "png";
+        const image = Image.fromRGBA(
+          encodedImage.value.width,
+          encodedImage.value.height,
+          encodedImage.value.data,
+        );
+
+        const originalFormat = originalImage.value?.originalFormat;
+
+        if (
+          originalFormat && !isLossyFormat(originalFormat) &&
+          selectedFormat === "png"
+        ) {
+          const losslessFormats = [
+            "png",
+            "gif",
+            "apng",
+            "bmp",
+            "tiff",
+            "ppm",
+            "pam",
+            "ico",
+          ];
+          if (losslessFormats.includes(originalFormat)) {
+            finalFormat = originalFormat;
+          }
+        }
+
+        if (finalFormat === "png") {
+          encodedData = await image.encode("png", { compressionLevel: 6 });
+        } else if (finalFormat === "webp") {
+          try {
+            encodedData = await image.encode("webp", {
+              lossless: true,
+              quality: 100,
+            });
+          } catch (err) {
+            console.warn("WebP encoding failed, falling back to PNG:", err);
+            encodedData = await image.encode("png", { compressionLevel: 6 });
+            finalFormat = "png";
+            error.value = "WebP encoding failed, saved as PNG instead";
+          }
+        } else if (finalFormat === "gif") {
+          try {
+            encodedData = await image.encode("gif");
+          } catch (err) {
+            console.warn("GIF encoding failed, falling back to PNG:", err);
+            encodedData = await image.encode("png", { compressionLevel: 6 });
+            finalFormat = "png";
+            error.value = "GIF encoding failed, saved as PNG instead";
+          }
+        } else if (finalFormat === "bmp") {
+          try {
+            encodedData = await image.encode("bmp");
+          } catch (err) {
+            console.warn("BMP encoding failed, falling back to PNG:", err);
+            encodedData = await image.encode("png", { compressionLevel: 6 });
+            finalFormat = "png";
+            error.value = "BMP encoding failed, saved as PNG instead";
+          }
+        } else if (finalFormat === "apng") {
+          try {
+            encodedData = await image.encode("apng", { compressionLevel: 6 });
+          } catch (err) {
+            console.warn("APNG encoding failed, falling back to PNG:", err);
+            encodedData = await image.encode("png", { compressionLevel: 6 });
+            finalFormat = "png";
+            error.value = "APNG encoding failed, saved as PNG instead";
+          }
+        } else if (finalFormat === "tiff") {
+          try {
+            encodedData = await image.encode("tiff", { compression: "lzw" });
+          } catch (err) {
+            console.warn("TIFF encoding failed, falling back to PNG:", err);
+            encodedData = await image.encode("png", { compressionLevel: 6 });
+            finalFormat = "png";
+            error.value = "TIFF encoding failed, saved as PNG instead";
+          }
+        } else if (finalFormat === "ppm") {
+          try {
+            encodedData = await image.encode("ppm");
+          } catch (err) {
+            console.warn("PPM encoding failed, falling back to PNG:", err);
+            encodedData = await image.encode("png", { compressionLevel: 6 });
+            finalFormat = "png";
+            error.value = "PPM encoding failed, saved as PNG instead";
+          }
+        } else if (finalFormat === "pam") {
+          try {
+            encodedData = await image.encode("pam");
+          } catch (err) {
+            console.warn("PAM encoding failed, falling back to PNG:", err);
+            encodedData = await image.encode("png", { compressionLevel: 6 });
+            finalFormat = "png";
+            error.value = "PAM encoding failed, saved as PNG instead";
+          }
+        } else if (finalFormat === "ico") {
+          try {
+            encodedData = await image.encode("ico");
+          } catch (err) {
+            console.warn("ICO encoding failed, falling back to PNG:", err);
+            encodedData = await image.encode("png", { compressionLevel: 6 });
+            finalFormat = "png";
+            error.value = "ICO encoding failed, saved as PNG instead";
+          }
+        } else {
+          encodedData = await image.encode("png", { compressionLevel: 6 });
+          finalFormat = "png";
+        }
       }
 
-      // Generate filename: original_name_ub.ext
       const originalFileName = originalImage.value?.originalFileName || "image";
-      const extension = finalFormat;
+      const extension = finalFormat === "jpeg" ? "jpg" : finalFormat;
       const downloadFileName = `${originalFileName}_ub.${extension}`;
 
-      // Map format to MIME type
       const mimeTypes: Record<string, string> = {
         png: "image/png",
         webp: "image/webp",
@@ -571,6 +646,7 @@ export default function Steganography() {
         ppm: "image/x-portable-pixmap",
         pam: "image/x-portable-arbitrarymap",
         ico: "image/x-icon",
+        jpeg: "image/jpeg",
       };
       const mimeType = mimeTypes[finalFormat] || "image/png";
       const blob = new Blob([new Uint8Array(encodedData)], { type: mimeType });
@@ -586,6 +662,9 @@ export default function Steganography() {
       error.value = `Download failed: ${
         err instanceof Error ? err.message : String(err)
       }`;
+    } finally {
+      isLoading.value = false;
+      loadingMessage.value = null;
     }
   }
 
@@ -603,6 +682,13 @@ export default function Steganography() {
         </div>
       )}
 
+      {isLoading.value && loadingMessage.value && (
+        <div class="mb-4 p-3 bg-blue-950/50 border border-blue-800 text-blue-400 rounded flex items-center gap-3">
+          <div class="animate-spin h-4 w-4 border-2 border-blue-400 border-t-transparent rounded-full" />
+          <span>{loadingMessage.value}</span>
+        </div>
+      )}
+
       {operationMode.value === "initial" && (
         <div class="space-y-6">
           <div class="border border-slate-800 rounded-lg p-6 bg-black/50">
@@ -614,9 +700,10 @@ export default function Steganography() {
               />
             </div>
             <p class="text-slate-300 mb-4 leading-relaxed">
-              Hide secret messages and files inside images using LSB (Least
-              Significant Bit) steganography. Your data is embedded invisibly in
-              the pixel data of lossless image formats.
+              Hide secret messages and files inside images using advanced
+              steganography techniques. Your data is embedded invisibly using
+              pixel-domain methods for lossless formats or coefficient-domain
+              methods for JPEG.
             </p>
             <div class="space-y-2 text-sm text-slate-400">
               <p>
@@ -628,12 +715,13 @@ export default function Steganography() {
                 Extract hidden data from an encoded image
               </p>
               <p>
-                • Supports lossless formats: PNG, WebP lossless, GIF, BMP, TIFF,
-                APNG, PPM, PAM, ICO
+                • <span class="text-amber-400">JPEG Support:</span>{" "}
+                Uses DCT coefficient-domain steganography (survives JPEG
+                compression)
               </p>
               <p>
-                • You can upload lossy formats (JPEG, lossy WebP) but they won't
-                be written to (encoding requires lossless formats)
+                • Lossless formats: PNG, WebP lossless, GIF, BMP, TIFF, APNG,
+                PPM, PAM, ICO (pixel-domain embedding)
               </p>
               <p>• Optional XOR encryption for additional security</p>
             </div>
@@ -704,10 +792,7 @@ export default function Steganography() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => {
-                    operationMode.value = "initial";
-                    encodedImage.value = null;
-                  }}
+                  onClick={resetSession}
                   class="text-xs text-slate-500 hover:text-slate-400"
                 >
                   ← Back to start
@@ -821,7 +906,8 @@ export default function Steganography() {
             </form>
           )}
 
-          {originalImage.value && (
+          {originalImage.value &&
+            originalImage.value.originalFormat !== "jpeg" && (
             <div class="border border-slate-800 rounded-lg p-4 bg-black/50">
               <h3 class="text-xs uppercase tracking-widest text-slate-500 mb-2">
                 Bit Depth: {bitDepth.value} bit{bitDepth.value !== 1 ? "s" : ""}
@@ -851,6 +937,55 @@ export default function Steganography() {
                   {bitDepth.value === 4 &&
                     "Very visible (deep-fried look), 4x capacity"}
                 </p>
+              </div>
+            </div>
+          )}
+
+          {originalImage.value &&
+            originalImage.value.originalFormat === "jpeg" &&
+            originalImage.value.jpegCoefficients && (
+            <div class="border border-amber-800/50 rounded-lg p-4 bg-amber-950/20">
+              <h3 class="text-xs uppercase tracking-widest text-amber-500 mb-2">
+                JPEG Coefficient Settings
+              </h3>
+              <div class="space-y-3">
+                <label class="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={useChroma.value}
+                    onChange={(e) => useChroma.value = e.currentTarget.checked}
+                    class="w-4 h-4 accent-amber-500"
+                  />
+                  <span class="text-slate-300">
+                    Use chroma channels (Cb, Cr)
+                  </span>
+                </label>
+                <p class="text-xs text-slate-400">
+                  {useChroma.value
+                    ? "Using all channels (Y, Cb, Cr) - higher capacity, slightly more visible"
+                    : "Using luminance only (Y) - lower capacity, more stealthy"}
+                </p>
+                {jpegCoefficientStats.value && (
+                  <div class="mt-2 p-2 bg-slate-950/50 rounded text-xs">
+                    <div class="text-amber-400 mb-1">Coefficient Stats:</div>
+                    <div class="text-slate-400">
+                      Luminance (Y):{" "}
+                      <span class="text-slate-300 font-mono">
+                        {jpegCoefficientStats.value.luminance.total
+                          .toLocaleString()}
+                      </span>{" "}
+                      usable coefficients
+                    </div>
+                    <div class="text-slate-400">
+                      Chroma (Cb/Cr):{" "}
+                      <span class="text-slate-300 font-mono">
+                        {jpegCoefficientStats.value.chroma.total
+                          .toLocaleString()}
+                      </span>{" "}
+                      usable coefficients
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -898,10 +1033,17 @@ export default function Steganography() {
             <button
               type="button"
               onClick={handleEncode}
-              disabled={!originalImage.value}
-              class="w-full px-4 py-3 bg-emerald-900/50 text-emerald-400 border border-emerald-800 rounded hover:bg-emerald-900/70 disabled:opacity-50 disabled:cursor-not-allowed font-bold"
+              disabled={!originalImage.value || isLoading.value}
+              class="w-full px-4 py-3 bg-emerald-900/50 text-emerald-400 border border-emerald-800 rounded hover:bg-emerald-900/70 disabled:opacity-50 disabled:cursor-not-allowed font-bold flex items-center justify-center gap-2"
             >
-              {mode.value === "file" ? "Encode File" : "Encode Message"}
+              {isLoading.value && (
+                <div class="animate-spin h-4 w-4 border-2 border-emerald-400 border-t-transparent rounded-full" />
+              )}
+              {isLoading.value
+                ? "Processing..."
+                : mode.value === "file"
+                ? "Encode File"
+                : "Encode Message"}
             </button>
           )}
 
@@ -922,10 +1064,16 @@ export default function Steganography() {
                     | "apng"
                     | "ppm"
                     | "pam"
-                    | "ico";
+                    | "ico"
+                    | "jpeg";
                 }}
                 class="w-full p-3 bg-slate-950 border border-slate-800 rounded text-cyan-400 focus:outline-none focus:border-emerald-800"
               >
+                {encodedImage.value.rawJpegData && (
+                  <option value="jpeg">
+                    JPEG (DCT Coefficient Steganography)
+                  </option>
+                )}
                 <option value="png">
                   {originalImage.value?.originalFormat &&
                       !isLossyFormat(originalImage.value.originalFormat) &&
@@ -945,10 +1093,12 @@ export default function Steganography() {
                 </option>
               </select>
               <p class="mt-2 text-xs text-slate-500">
-                {outputFormat.value === "png" &&
-                    originalImage.value?.originalFormat &&
-                    !isLossyFormat(originalImage.value.originalFormat) &&
-                    originalImage.value.originalFormat === "png"
+                {outputFormat.value === "jpeg"
+                  ? "JPEG with hidden data in DCT coefficients - survives re-sharing"
+                  : outputFormat.value === "png" &&
+                      originalImage.value?.originalFormat &&
+                      !isLossyFormat(originalImage.value.originalFormat) &&
+                      originalImage.value.originalFormat === "png"
                   ? "Preserving original PNG format"
                   : outputFormat.value === "png"
                   ? "Universal support, larger files"
@@ -969,8 +1119,9 @@ export default function Steganography() {
                   : "Windows icon format, small capacity (~24KB max for 256×256)"}
               </p>
               <p class="mt-2 text-xs text-slate-600 italic">
-                Note: Only lossless formats preserve pixel-domain LSB data
-                perfectly.
+                {outputFormat.value === "jpeg"
+                  ? "Note: JPEG uses coefficient-domain steganography which survives JPEG re-compression."
+                  : "Note: Lossless formats preserve pixel-domain embedding data perfectly."}
               </p>
             </div>
           )}
@@ -979,9 +1130,13 @@ export default function Steganography() {
             <button
               type="button"
               onClick={handleDownload}
-              class="w-full px-4 py-3 bg-emerald-600 text-white border border-emerald-500 rounded hover:bg-emerald-500 font-bold shadow-lg shadow-emerald-900/50"
+              disabled={isLoading.value}
+              class="w-full px-4 py-3 bg-emerald-600 text-white border border-emerald-500 rounded hover:bg-emerald-500 font-bold shadow-lg shadow-emerald-900/50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
-              Download Encoded Image
+              {isLoading.value && (
+                <div class="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+              )}
+              {isLoading.value ? "Preparing..." : "Download Encoded Image"}
             </button>
           )}
         </div>
@@ -1004,11 +1159,7 @@ export default function Steganography() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => {
-                    operationMode.value = "initial";
-                    encodedImage.value = null;
-                    message.value = "";
-                  }}
+                  onClick={resetSession}
                   class="text-xs text-slate-500 hover:text-slate-400"
                 >
                   ← Back to start
@@ -1053,7 +1204,8 @@ export default function Steganography() {
             </form>
           )}
 
-          {originalImage.value && (
+          {originalImage.value &&
+            originalImage.value.originalFormat !== "jpeg" && (
             <div class="border border-slate-800 rounded-lg p-4 bg-black/50">
               <h3 class="text-xs uppercase tracking-widest text-slate-500 mb-2">
                 Bit Depth: {bitDepth.value} bit{bitDepth.value !== 1 ? "s" : ""}
@@ -1083,14 +1235,44 @@ export default function Steganography() {
             </div>
           )}
 
+          {originalImage.value &&
+            originalImage.value.originalFormat === "jpeg" &&
+            originalImage.value.jpegCoefficients && (
+            <div class="border border-amber-800/50 rounded-lg p-4 bg-amber-950/20">
+              <h3 class="text-xs uppercase tracking-widest text-amber-500 mb-2">
+                JPEG Coefficient Settings
+              </h3>
+              <div class="space-y-3">
+                <label class="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={useChroma.value}
+                    onChange={(e) => useChroma.value = e.currentTarget.checked}
+                    class="w-4 h-4 accent-amber-500"
+                  />
+                  <span class="text-slate-300">
+                    Use chroma channels (Cb, Cr)
+                  </span>
+                </label>
+                <p class="text-xs text-slate-400">
+                  Must match the setting used during encoding
+                </p>
+              </div>
+            </div>
+          )}
+
           {originalImage.value && (
             <button
               type="button"
               onClick={handleDecode}
-              disabled={!originalImage.value && !encodedImage.value}
-              class="w-full px-4 py-3 bg-cyan-900/50 text-cyan-400 border border-cyan-800 rounded hover:bg-cyan-900/70 disabled:opacity-50 disabled:cursor-not-allowed font-bold"
+              disabled={(!originalImage.value && !encodedImage.value) ||
+                isLoading.value}
+              class="w-full px-4 py-3 bg-cyan-900/50 text-cyan-400 border border-cyan-800 rounded hover:bg-cyan-900/70 disabled:opacity-50 disabled:cursor-not-allowed font-bold flex items-center justify-center gap-2"
             >
-              Decode Message
+              {isLoading.value && (
+                <div class="animate-spin h-4 w-4 border-2 border-cyan-400 border-t-transparent rounded-full" />
+              )}
+              {isLoading.value ? "Decoding..." : "Decode Message"}
             </button>
           )}
 
@@ -1123,269 +1305,480 @@ export default function Steganography() {
             </div>
           </div>
 
-          {lsbStats.value && (
-            <div class="border border-slate-800 rounded-lg p-4 bg-black/50">
-              <h3 class="text-xs uppercase tracking-widest text-slate-500 mb-4">
-                LSB Statistics & Histogram
-              </h3>
+          {/* Unified Embedding Analysis Panel */}
+          {(lsbStats.value || jpegCoefficientStats.value) && (
+            <div class="border border-slate-800 rounded-lg overflow-hidden bg-gradient-to-b from-slate-900/80 to-black/60">
+              {/* Header with method badge */}
+              <div class="px-4 py-3 border-b border-slate-800/50 flex items-center justify-between bg-slate-900/50">
+                <h3 class="text-xs uppercase tracking-widest text-slate-400 font-medium">
+                  Embedding Analysis
+                </h3>
+                <span
+                  class={`text-[10px] uppercase tracking-wide px-2 py-1 rounded-full font-medium ${
+                    encodedImage.value?.originalFormat === "jpeg"
+                      ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                      : "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                  }`}
+                >
+                  {encodedImage.value?.originalFormat === "jpeg"
+                    ? "DCT Coefficients"
+                    : "Pixel Domain LSB"}
+                </span>
+              </div>
 
-              <div class="space-y-4">
-                <div class="grid grid-cols-3 gap-4 text-xs">
-                  <div class="border border-slate-800 rounded p-3 bg-slate-950/50">
-                    <div class="text-red-400 mb-1">Red Channel</div>
-                    <div class="text-slate-400 text-xs">
-                      LSB=1:{" "}
-                      <span class="text-red-300 font-mono">
-                        {lsbStats.value.red.ones.toLocaleString()}
-                      </span>
-                    </div>
-                    <div class="text-slate-400 text-xs">
-                      LSB=0:{" "}
-                      <span class="text-slate-300 font-mono">
-                        {lsbStats.value.red.zeros.toLocaleString()}
-                      </span>
-                    </div>
-                    {lsbStats.value.red.changed !== undefined && (
-                      <div class="text-cyan-400 text-xs mt-1">
-                        Changed:{" "}
-                        <span class="text-cyan-300 font-mono">
-                          {lsbStats.value.red.changed.toLocaleString()}
-                        </span>
-                      </div>
-                    )}
-                    <div class="mt-2 space-y-1">
-                      <div class="text-xs text-slate-500">
-                        Active LSB (LSB=1)
-                      </div>
-                      <div class="h-2 bg-slate-900 rounded-full overflow-hidden">
-                        <div
-                          class="h-full bg-red-500"
-                          style={`width: ${
-                            (lsbStats.value.red.ones /
-                              (lsbStats.value.red.ones +
-                                lsbStats.value.red.zeros)) * 100
-                          }%`}
-                        />
-                      </div>
-                      {lsbStats.value.red.changed !== undefined &&
-                        lsbStats.value.red.changed > 0 && (
-                        <>
-                          <div class="text-xs text-slate-500 mt-1">
-                            Changed Bits
-                          </div>
-                          <div class="h-2 bg-slate-900 rounded-full overflow-hidden relative">
+              <div class="p-4 space-y-4">
+                {/* Channel histogram visualization */}
+                {lsbStats.value &&
+                  encodedImage.value?.originalFormat !== "jpeg" && (
+                  <div class="grid grid-cols-3 gap-3">
+                    {/* Red Channel */}
+                    <div class="relative group">
+                      <div class="bg-slate-950/70 rounded-lg p-3 border border-slate-800/50 hover:border-red-500/30 transition-colors">
+                        <div class="flex items-center justify-between mb-2">
+                          <span class="text-red-400 text-xs font-medium">
+                            R
+                          </span>
+                          <span class="text-slate-500 text-[10px] font-mono">
+                            {(
+                              (lsbStats.value.red.ones /
+                                (lsbStats.value.red.ones +
+                                  lsbStats.value.red.zeros)) * 100
+                            ).toFixed(1)}%
+                          </span>
+                        </div>
+                        {/* Vertical histogram bars */}
+                        <div class="flex items-end justify-center gap-1 h-16">
+                          <div class="flex flex-col items-center gap-1 flex-1">
                             <div
-                              class="h-full bg-cyan-500"
-                              style={`width: ${
+                              class="w-full bg-red-500/80 rounded-t transition-all"
+                              style={`height: ${
                                 Math.max(
-                                  1,
-                                  (lsbStats.value.red.changed /
+                                  4,
+                                  (lsbStats.value.red.ones /
                                     (lsbStats.value.red.ones +
-                                      lsbStats.value.red.zeros)) * 100,
+                                      lsbStats.value.red.zeros)) * 64,
                                 )
-                              }%`}
+                              }px`}
                             />
+                            <span class="text-[9px] text-slate-500">1</span>
                           </div>
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  <div class="border border-slate-800 rounded p-3 bg-slate-950/50">
-                    <div class="text-green-400 mb-1">Green Channel</div>
-                    <div class="text-slate-400 text-xs">
-                      LSB=1:{" "}
-                      <span class="text-green-300 font-mono">
-                        {lsbStats.value.green.ones.toLocaleString()}
-                      </span>
-                    </div>
-                    <div class="text-slate-400 text-xs">
-                      LSB=0:{" "}
-                      <span class="text-slate-300 font-mono">
-                        {lsbStats.value.green.zeros.toLocaleString()}
-                      </span>
-                    </div>
-                    {lsbStats.value.green.changed !== undefined && (
-                      <div class="text-cyan-400 text-xs mt-1">
-                        Changed:{" "}
-                        <span class="text-cyan-300 font-mono">
-                          {lsbStats.value.green.changed.toLocaleString()}
-                        </span>
-                      </div>
-                    )}
-                    <div class="mt-2 space-y-1">
-                      <div class="text-xs text-slate-500">
-                        Active LSB (LSB=1)
-                      </div>
-                      <div class="h-2 bg-slate-900 rounded-full overflow-hidden">
-                        <div
-                          class="h-full bg-green-500"
-                          style={`width: ${
-                            (lsbStats.value.green.ones /
-                              (lsbStats.value.green.ones +
-                                lsbStats.value.green.zeros)) * 100
-                          }%`}
-                        />
-                      </div>
-                      {lsbStats.value.green.changed !== undefined &&
-                        lsbStats.value.green.changed > 0 && (
-                        <>
-                          <div class="text-xs text-slate-500 mt-1">
-                            Changed Bits
-                          </div>
-                          <div class="h-2 bg-slate-900 rounded-full overflow-hidden relative">
+                          <div class="flex flex-col items-center gap-1 flex-1">
                             <div
-                              class="h-full bg-cyan-500"
-                              style={`width: ${
+                              class="w-full bg-slate-600 rounded-t transition-all"
+                              style={`height: ${
                                 Math.max(
-                                  1,
-                                  (lsbStats.value.green.changed /
+                                  4,
+                                  (lsbStats.value.red.zeros /
+                                    (lsbStats.value.red.ones +
+                                      lsbStats.value.red.zeros)) * 64,
+                                )
+                              }px`}
+                            />
+                            <span class="text-[9px] text-slate-500">0</span>
+                          </div>
+                          {lsbStats.value.red.changed !== undefined &&
+                            lsbStats.value.red.changed > 0 && (
+                            <div class="flex flex-col items-center gap-1 flex-1">
+                              <div
+                                class="w-full bg-cyan-500 rounded-t transition-all"
+                                style={`height: ${
+                                  Math.max(
+                                    4,
+                                    Math.min(
+                                      64,
+                                      (lsbStats.value.red.changed /
+                                        (lsbStats.value.red.ones +
+                                          lsbStats.value.red.zeros)) * 640,
+                                    ),
+                                  )
+                                }px`}
+                              />
+                              <span class="text-[9px] text-cyan-400">Δ</span>
+                            </div>
+                          )}
+                        </div>
+                        {lsbStats.value.red.changed !== undefined && (
+                          <div class="mt-2 text-center text-[10px] text-cyan-400/80 font-mono">
+                            Δ {lsbStats.value.red.changed.toLocaleString()}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Green Channel */}
+                    <div class="relative group">
+                      <div class="bg-slate-950/70 rounded-lg p-3 border border-slate-800/50 hover:border-green-500/30 transition-colors">
+                        <div class="flex items-center justify-between mb-2">
+                          <span class="text-green-400 text-xs font-medium">
+                            G
+                          </span>
+                          <span class="text-slate-500 text-[10px] font-mono">
+                            {(
+                              (lsbStats.value.green.ones /
+                                (lsbStats.value.green.ones +
+                                  lsbStats.value.green.zeros)) * 100
+                            ).toFixed(1)}%
+                          </span>
+                        </div>
+                        <div class="flex items-end justify-center gap-1 h-16">
+                          <div class="flex flex-col items-center gap-1 flex-1">
+                            <div
+                              class="w-full bg-green-500/80 rounded-t transition-all"
+                              style={`height: ${
+                                Math.max(
+                                  4,
+                                  (lsbStats.value.green.ones /
                                     (lsbStats.value.green.ones +
-                                      lsbStats.value.green.zeros)) * 100,
+                                      lsbStats.value.green.zeros)) * 64,
                                 )
-                              }%`}
+                              }px`}
                             />
+                            <span class="text-[9px] text-slate-500">1</span>
                           </div>
-                        </>
-                      )}
+                          <div class="flex flex-col items-center gap-1 flex-1">
+                            <div
+                              class="w-full bg-slate-600 rounded-t transition-all"
+                              style={`height: ${
+                                Math.max(
+                                  4,
+                                  (lsbStats.value.green.zeros /
+                                    (lsbStats.value.green.ones +
+                                      lsbStats.value.green.zeros)) * 64,
+                                )
+                              }px`}
+                            />
+                            <span class="text-[9px] text-slate-500">0</span>
+                          </div>
+                          {lsbStats.value.green.changed !== undefined &&
+                            lsbStats.value.green.changed > 0 && (
+                            <div class="flex flex-col items-center gap-1 flex-1">
+                              <div
+                                class="w-full bg-cyan-500 rounded-t transition-all"
+                                style={`height: ${
+                                  Math.max(
+                                    4,
+                                    Math.min(
+                                      64,
+                                      (lsbStats.value.green.changed /
+                                        (lsbStats.value.green.ones +
+                                          lsbStats.value.green.zeros)) * 640,
+                                    ),
+                                  )
+                                }px`}
+                              />
+                              <span class="text-[9px] text-cyan-400">Δ</span>
+                            </div>
+                          )}
+                        </div>
+                        {lsbStats.value.green.changed !== undefined && (
+                          <div class="mt-2 text-center text-[10px] text-cyan-400/80 font-mono">
+                            Δ {lsbStats.value.green.changed.toLocaleString()}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Blue Channel */}
+                    <div class="relative group">
+                      <div class="bg-slate-950/70 rounded-lg p-3 border border-slate-800/50 hover:border-blue-500/30 transition-colors">
+                        <div class="flex items-center justify-between mb-2">
+                          <span class="text-blue-400 text-xs font-medium">
+                            B
+                          </span>
+                          <span class="text-slate-500 text-[10px] font-mono">
+                            {(
+                              (lsbStats.value.blue.ones /
+                                (lsbStats.value.blue.ones +
+                                  lsbStats.value.blue.zeros)) * 100
+                            ).toFixed(1)}%
+                          </span>
+                        </div>
+                        <div class="flex items-end justify-center gap-1 h-16">
+                          <div class="flex flex-col items-center gap-1 flex-1">
+                            <div
+                              class="w-full bg-blue-500/80 rounded-t transition-all"
+                              style={`height: ${
+                                Math.max(
+                                  4,
+                                  (lsbStats.value.blue.ones /
+                                    (lsbStats.value.blue.ones +
+                                      lsbStats.value.blue.zeros)) * 64,
+                                )
+                              }px`}
+                            />
+                            <span class="text-[9px] text-slate-500">1</span>
+                          </div>
+                          <div class="flex flex-col items-center gap-1 flex-1">
+                            <div
+                              class="w-full bg-slate-600 rounded-t transition-all"
+                              style={`height: ${
+                                Math.max(
+                                  4,
+                                  (lsbStats.value.blue.zeros /
+                                    (lsbStats.value.blue.ones +
+                                      lsbStats.value.blue.zeros)) * 64,
+                                )
+                              }px`}
+                            />
+                            <span class="text-[9px] text-slate-500">0</span>
+                          </div>
+                          {lsbStats.value.blue.changed !== undefined &&
+                            lsbStats.value.blue.changed > 0 && (
+                            <div class="flex flex-col items-center gap-1 flex-1">
+                              <div
+                                class="w-full bg-cyan-500 rounded-t transition-all"
+                                style={`height: ${
+                                  Math.max(
+                                    4,
+                                    Math.min(
+                                      64,
+                                      (lsbStats.value.blue.changed /
+                                        (lsbStats.value.blue.ones +
+                                          lsbStats.value.blue.zeros)) * 640,
+                                    ),
+                                  )
+                                }px`}
+                              />
+                              <span class="text-[9px] text-cyan-400">Δ</span>
+                            </div>
+                          )}
+                        </div>
+                        {lsbStats.value.blue.changed !== undefined && (
+                          <div class="mt-2 text-center text-[10px] text-cyan-400/80 font-mono">
+                            Δ {lsbStats.value.blue.changed.toLocaleString()}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
+                )}
 
-                  <div class="border border-slate-800 rounded p-3 bg-slate-950/50">
-                    <div class="text-blue-400 mb-1">Blue Channel</div>
-                    <div class="text-slate-400 text-xs">
-                      LSB=1:{" "}
-                      <span class="text-blue-300 font-mono">
-                        {lsbStats.value.blue.ones.toLocaleString()}
+                {/* JPEG coefficient channels */}
+                {jpegCoefficientStats.value &&
+                  encodedImage.value?.originalFormat === "jpeg" && (
+                  <div
+                    class={`grid gap-3 ${
+                      useChroma.value ? "grid-cols-2" : "grid-cols-1"
+                    }`}
+                  >
+                    {/* Luminance (Y) */}
+                    <div class="relative group">
+                      <div class="bg-slate-950/70 rounded-lg p-3 border border-slate-800/50 hover:border-amber-500/30 transition-colors">
+                        <div class="flex items-center justify-between mb-2">
+                          <span class="text-amber-400 text-xs font-medium">
+                            Y (Luminance)
+                          </span>
+                          <span class="text-slate-500 text-[10px] font-mono">
+                            {jpegCoefficientStats.value.luminance.total > 0
+                              ? (
+                                (jpegCoefficientStats.value.luminance.ones /
+                                  jpegCoefficientStats.value.luminance.total) *
+                                100
+                              ).toFixed(1)
+                              : 0}%
+                          </span>
+                        </div>
+                        <div class="flex items-end justify-center gap-1 h-16">
+                          <div class="flex flex-col items-center gap-1 flex-1">
+                            <div
+                              class="w-full bg-amber-500/80 rounded-t transition-all"
+                              style={`height: ${
+                                jpegCoefficientStats.value.luminance.total > 0
+                                  ? Math.max(
+                                    4,
+                                    (jpegCoefficientStats.value.luminance.ones /
+                                      jpegCoefficientStats.value.luminance
+                                        .total) * 64,
+                                  )
+                                  : 4
+                              }px`}
+                            />
+                            <span class="text-[9px] text-slate-500">1</span>
+                          </div>
+                          <div class="flex flex-col items-center gap-1 flex-1">
+                            <div
+                              class="w-full bg-slate-600 rounded-t transition-all"
+                              style={`height: ${
+                                jpegCoefficientStats.value.luminance.total > 0
+                                  ? Math.max(
+                                    4,
+                                    (jpegCoefficientStats.value.luminance
+                                      .zeros /
+                                      jpegCoefficientStats.value.luminance
+                                        .total) * 64,
+                                  )
+                                  : 4
+                              }px`}
+                            />
+                            <span class="text-[9px] text-slate-500">0</span>
+                          </div>
+                        </div>
+                        <div class="mt-2 text-center text-[10px] text-amber-400/80 font-mono">
+                          {jpegCoefficientStats.value.luminance.total
+                            .toLocaleString()} coeffs
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Chroma (Cb/Cr) - only if enabled */}
+                    {useChroma.value && (
+                      <div class="relative group">
+                        <div class="bg-slate-950/70 rounded-lg p-3 border border-slate-800/50 hover:border-purple-500/30 transition-colors">
+                          <div class="flex items-center justify-between mb-2">
+                            <span class="text-purple-400 text-xs font-medium">
+                              Cb/Cr (Chroma)
+                            </span>
+                            <span class="text-slate-500 text-[10px] font-mono">
+                              {jpegCoefficientStats.value.chroma.total > 0
+                                ? (
+                                  (jpegCoefficientStats.value.chroma.ones /
+                                    jpegCoefficientStats.value.chroma.total) *
+                                  100
+                                ).toFixed(1)
+                                : 0}%
+                            </span>
+                          </div>
+                          <div class="flex items-end justify-center gap-1 h-16">
+                            <div class="flex flex-col items-center gap-1 flex-1">
+                              <div
+                                class="w-full bg-purple-500/80 rounded-t transition-all"
+                                style={`height: ${
+                                  jpegCoefficientStats.value.chroma.total > 0
+                                    ? Math.max(
+                                      4,
+                                      (jpegCoefficientStats.value.chroma.ones /
+                                        jpegCoefficientStats.value.chroma
+                                          .total) * 64,
+                                    )
+                                    : 4
+                                }px`}
+                              />
+                              <span class="text-[9px] text-slate-500">1</span>
+                            </div>
+                            <div class="flex flex-col items-center gap-1 flex-1">
+                              <div
+                                class="w-full bg-slate-600 rounded-t transition-all"
+                                style={`height: ${
+                                  jpegCoefficientStats.value.chroma.total > 0
+                                    ? Math.max(
+                                      4,
+                                      (jpegCoefficientStats.value.chroma.zeros /
+                                        jpegCoefficientStats.value.chroma
+                                          .total) * 64,
+                                    )
+                                    : 4
+                                }px`}
+                              />
+                              <span class="text-[9px] text-slate-500">0</span>
+                            </div>
+                          </div>
+                          <div class="mt-2 text-center text-[10px] text-purple-400/80 font-mono">
+                            {jpegCoefficientStats.value.chroma.total
+                              .toLocaleString()} coeffs
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Summary footer */}
+                <div class="bg-slate-950/50 rounded-lg p-3 border border-slate-800/30">
+                  <div class="flex items-center justify-between text-xs">
+                    <div class="text-slate-400">
+                      <span class="text-slate-500">Capacity:</span>{" "}
+                      <span class="text-emerald-400 font-mono font-medium">
+                        {encodedImage.value?.originalFormat === "jpeg" &&
+                            jpegCoefficientStats.value
+                          ? `${
+                            Math.floor(
+                              jpegCoefficientStats.value.total.usable / 8,
+                            ).toLocaleString()
+                          } bytes`
+                          : lsbStats.value
+                          ? `${
+                            Math.floor(
+                              (lsbStats.value.total.ones +
+                                lsbStats.value.total.zeros) / 8,
+                            ).toLocaleString()
+                          } bytes`
+                          : "—"}
                       </span>
                     </div>
-                    <div class="text-slate-400 text-xs">
-                      LSB=0:{" "}
-                      <span class="text-slate-300 font-mono">
-                        {lsbStats.value.blue.zeros.toLocaleString()}
-                      </span>
-                    </div>
-                    {lsbStats.value.blue.changed !== undefined && (
-                      <div class="text-cyan-400 text-xs mt-1">
-                        Changed:{" "}
-                        <span class="text-cyan-300 font-mono">
-                          {lsbStats.value.blue.changed.toLocaleString()}
+                    {lsbStats.value?.total.changed !== undefined &&
+                      encodedImage.value?.originalFormat !== "jpeg" && (
+                      <div class="text-slate-400">
+                        <span class="text-slate-500">Modified:</span>{" "}
+                        <span class="text-cyan-400 font-mono font-medium">
+                          {lsbStats.value.total.changed.toLocaleString()} bits
+                        </span>
+                        <span class="text-slate-500 ml-1">
+                          ({(
+                            (lsbStats.value.total.changed /
+                              (lsbStats.value.total.ones +
+                                lsbStats.value.total.zeros)) *
+                            100
+                          ).toFixed(2)}%)
                         </span>
                       </div>
                     )}
-                    <div class="mt-2 space-y-1">
-                      <div class="text-xs text-slate-500">
-                        Active LSB (LSB=1)
+                    {encodedImage.value?.originalFormat === "jpeg" &&
+                      jpegCoefficientStats.value && (
+                      <div class="text-slate-400">
+                        <span class="text-slate-500">Channels:</span>{" "}
+                        <span class="text-amber-400 font-medium">
+                          {useChroma.value ? "Y + Cb/Cr" : "Y only"}
+                        </span>
                       </div>
-                      <div class="h-2 bg-slate-900 rounded-full overflow-hidden">
+                    )}
+                  </div>
+
+                  {/* Capacity usage bar */}
+                  {bitCapacity.value > 0 && (
+                    <div class="mt-3">
+                      <div class="flex items-center justify-between text-[10px] text-slate-500 mb-1">
+                        <span>Usage</span>
+                        <span>
+                          {mode.value === "text"
+                            ? `${
+                              new TextEncoder().encode(message.value).length
+                            } / ${bitCapacity.value} bytes`
+                            : fileInput.value
+                            ? `${fileInput.value.size} / ${bitCapacity.value} bytes`
+                            : `0 / ${bitCapacity.value} bytes`}
+                        </span>
+                      </div>
+                      <div class="h-1.5 bg-slate-900 rounded-full overflow-hidden">
                         <div
-                          class="h-full bg-blue-500"
+                          class={`h-full transition-all rounded-full ${
+                            (() => {
+                              const used = mode.value === "text"
+                                ? new TextEncoder().encode(message.value).length
+                                : (fileInput.value?.size ?? 0);
+                              const pct = (used / bitCapacity.value) * 100;
+                              return pct > 90
+                                ? "bg-red-500"
+                                : pct > 70
+                                ? "bg-amber-500"
+                                : "bg-emerald-500";
+                            })()
+                          }`}
                           style={`width: ${
-                            (lsbStats.value.blue.ones /
-                              (lsbStats.value.blue.ones +
-                                lsbStats.value.blue.zeros)) * 100
+                            Math.min(
+                              100,
+                              (() => {
+                                const used = mode.value === "text"
+                                  ? new TextEncoder().encode(message.value)
+                                    .length
+                                  : (fileInput.value?.size ?? 0);
+                                return (used / bitCapacity.value) * 100;
+                              })(),
+                            )
                           }%`}
                         />
                       </div>
-                      {lsbStats.value.blue.changed !== undefined &&
-                        lsbStats.value.blue.changed > 0 && (
-                        <>
-                          <div class="text-xs text-slate-500 mt-1">
-                            Changed Bits
-                          </div>
-                          <div class="h-2 bg-slate-900 rounded-full overflow-hidden relative">
-                            <div
-                              class="h-full bg-cyan-500"
-                              style={`width: ${
-                                Math.max(
-                                  1,
-                                  (lsbStats.value.blue.changed /
-                                    (lsbStats.value.blue.ones +
-                                      lsbStats.value.blue.zeros)) * 100,
-                                )
-                              }%`}
-                            />
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div class="border border-emerald-800 rounded p-3 bg-emerald-950/20">
-                  <div class="text-emerald-400 mb-1 font-semibold">
-                    Total Across All Channels
-                  </div>
-                  <div class="text-slate-300 text-sm">
-                    LSB=1:{" "}
-                    <span class="text-emerald-300 font-mono">
-                      {lsbStats.value.total.ones.toLocaleString()}
-                    </span>{" "}
-                    | LSB=0:{" "}
-                    <span class="text-slate-300 font-mono">
-                      {lsbStats.value.total.zeros.toLocaleString()}
-                    </span>
-                  </div>
-                  {lsbStats.value.total.changed !== undefined && (
-                    <div class="text-cyan-400 text-sm mt-1">
-                      Bits Changed:{" "}
-                      <span class="text-cyan-300 font-mono font-semibold">
-                        {lsbStats.value.total.changed.toLocaleString()}
-                      </span>{" "}
-                      (
-                      {((lsbStats.value.total.changed /
-                        (lsbStats.value.total.ones +
-                          lsbStats.value.total.zeros)) * 100).toFixed(2)}% of
-                      all LSBs)
                     </div>
                   )}
-                  <div class="mt-2 space-y-2">
-                    <div>
-                      <div class="text-xs text-slate-400 mb-1">
-                        Active LSB (LSB=1)
-                      </div>
-                      <div class="h-3 bg-slate-900 rounded-full overflow-hidden">
-                        <div
-                          class="h-full bg-emerald-500"
-                          style={`width: ${
-                            (lsbStats.value.total.ones /
-                              (lsbStats.value.total.ones +
-                                lsbStats.value.total.zeros)) * 100
-                          }%`}
-                        />
-                      </div>
-                    </div>
-                    {lsbStats.value.total.changed !== undefined &&
-                      lsbStats.value.total.changed > 0 && (
-                      <div>
-                        <div class="text-xs text-slate-400 mb-1">
-                          Changed Bits
-                        </div>
-                        <div class="h-3 bg-slate-900 rounded-full overflow-hidden relative">
-                          <div
-                            class="h-full bg-cyan-500"
-                            style={`width: ${
-                              Math.max(
-                                1,
-                                (lsbStats.value.total.changed /
-                                  (lsbStats.value.total.ones +
-                                    lsbStats.value.total.zeros)) * 100,
-                              )
-                            }%`}
-                          />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <div class="mt-2 text-xs text-slate-500">
-                    {((lsbStats.value.total.ones /
-                      (lsbStats.value.total.ones +
-                        lsbStats.value.total.zeros)) * 100).toFixed(2)}% of bits
-                    are set to 1
-                    {lsbStats.value.total.changed !== undefined && (
-                      <span class="text-slate-400">(after encoding)</span>
-                    )}
-                  </div>
                 </div>
               </div>
             </div>

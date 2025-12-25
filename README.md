@@ -4,11 +4,12 @@
   <img src="static/logo.png" alt="UnderByte Logo" width="200">
 </div>
 
-**LSB Steganography Web Application**
+**Steganography Web Application**
 
 UnderByte is a web-based tool for hiding messages and files inside images using
-Least Significant Bit (LSB) steganography. Encode text or files into lossless
-image formats with optional password encryption.
+advanced steganography techniques. Encode text or files into images with support
+for both lossless formats (pixel-domain) and JPEG (coefficient-domain) with
+optional password encryption.
 
 ## Features
 
@@ -17,7 +18,8 @@ image formats with optional password encryption.
 - **Multiple Formats**: Supports PNG, WebP, GIF, BMP, TIFF, APNG, and more
 - **Adjustable Bit Depth**: Control visibility vs capacity (1-4 bits per
   channel)
-- **Real-time Statistics**: View LSB distribution and modification statistics
+- **Real-time Statistics**: View embedding distribution and modification
+  statistics
 
 ## Getting Started
 
@@ -48,11 +50,12 @@ deno task start
 4. For decoding: Enter the password if used during encoding
 5. Download your encoded image or extracted data
 
-## Future Plans
+## Supported Methods
 
-- **Lossy Format Support**: Add steganography support for JPEG and other lossy
-  formats using DCT (Discrete Cosine Transform) domain embedding, allowing data
-  to survive re-compression
+- **Pixel-Domain Steganography**: LSB (Least Significant Bit) embedding for
+  lossless formats (PNG, WebP lossless, GIF, BMP, TIFF, APNG, PPM, PAM, ICO)
+- **Coefficient-Domain Steganography**: DCT (Discrete Cosine Transform)
+  coefficient embedding for JPEG, allowing data to survive re-compression
 
 ## Technical Details
 

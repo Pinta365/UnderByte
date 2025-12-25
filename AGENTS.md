@@ -7,8 +7,9 @@ UnderByte.
 
 - **`islands/Steganography.tsx`**: Main interactive component handling UI,
   state, and steganography operations
-- **`utils/steganography.ts`**: Core LSB steganography logic (embedding,
-  extraction, statistics)
+- **`utils/steganography.ts`**: Core steganography logic (pixel-domain LSB
+  embedding/extraction for lossless formats, coefficient-domain embedding for
+  JPEG, statistics)
 - **`routes/index.tsx`**: Main page route
 - **`routes/_app.tsx`**: App layout wrapper
 - **`main.ts`**: Fresh app initialization
@@ -63,7 +64,8 @@ deno task start
 - **State Management**: Use `@preact/signals` for all reactive state
 - **Image Processing**: Use `@cross/image` library (local copy in
   `references/cross-image-package/`)
-- **Format Handling**: Only lossless formats support LSB steganography currently
+- **Format Handling**: Supports both lossless formats (pixel-domain LSB) and
+  JPEG (coefficient-domain DCT embedding)
 - **Error Handling**: Display errors via `error` signal, show user-friendly
   messages
 - **File Operations**: Use browser File API for uploads, create download links
@@ -71,15 +73,16 @@ deno task start
 
 ### Important Notes
 
-- **Lossy Formats**: JPEG and other lossy formats can be uploaded but cannot be
-  written to (only decoded). This is intentional - lossy format support is
-  planned for future release using DCT domain embedding.
+- **Lossy Formats**: JPEG is fully supported using DCT coefficient-domain
+  embedding, which allows data to survive JPEG re-compression. Other lossy
+  formats (WebP lossy, etc.) may be added in the future.
 - **Bit Depth**: Supports 1-4 bits per channel. Higher bit depth = more capacity
   but more visible changes.
 - **Password Encryption**: Uses XOR encryption (simple but effective for
   steganography use case)
-- **LSB Statistics**: Tracks LSB=1, LSB=0, and changed bits per channel for
-  analysis
+- **Statistics**: Tracks embedding distribution (LSB=1, LSB=0, changed bits) for
+  pixel-domain methods, and coefficient statistics for JPEG coefficient-domain
+  methods
 
 ### UI/UX Guidelines
 
@@ -109,6 +112,7 @@ deno task start
 
 ### Future Work
 
-- **Lossy Format Support**: DCT domain steganography for JPEG (planned)
+- **Additional Lossy Formats**: DCT domain steganography for other lossy formats
+  (WebP lossy, etc.)
 - Keep this file updated as the project evolves
 - Maintain backward compatibility for user-facing features

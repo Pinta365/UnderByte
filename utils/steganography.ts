@@ -1,8 +1,13 @@
 /**
- * Core steganography utilities for LSB embedding, XOR encryption, and Bit-Sieve visualization
+ * Core steganography utilities for embedding, extraction, XOR encryption, and visualization
+ * Supports both pixel-domain (LSB for lossless formats) and coefficient-domain (DCT for JPEG) steganography
  */
 
-import { Image } from "@cross/image";
+import {
+  Image,
+  type JPEGComponentCoefficients,
+  type JPEGQuantizedCoefficients,
+} from "@cross/image";
 
 /**
  * Detects image format from file data using @cross/image's format handlers
@@ -12,7 +17,6 @@ import { Image } from "@cross/image";
 export function detectImageFormat(data: Uint8Array): string | null {
   const formats = Image.getFormats();
 
-  // Try each format handler's canDecode method (same as Image.decode does internally)
   for (const format of formats) {
     if (format.canDecode(data)) {
       return format.name;
@@ -23,25 +27,23 @@ export function detectImageFormat(data: Uint8Array): string | null {
 }
 
 /**
- * Checks if a format is lossy (will destroy LSB data on re-encoding)
+ * Checks if a format is lossy (will destroy pixel-domain embedding data on re-encoding)
  */
 export function isLossyFormat(format: string | null): boolean {
   if (!format) return false;
-  const lossyFormats = ["jpeg", "webp"]; // WebP can be lossy or lossless, but we'll treat it as potentially lossy
+  const lossyFormats = ["jpeg", "webp"];
   return lossyFormats.includes(format.toLowerCase());
 }
 
 /**
  * Gets a recommended output format based on input format
- * Always returns a lossless format to preserve LSB data
+ * Always returns a lossless format to preserve pixel-domain embedding data
  */
 export function getRecommendedOutputFormat(inputFormat: string | null): {
   format: string;
   reason: string;
   useWebP?: boolean;
 } {
-  // Use PNG as default (most compatible)
-  // WebP lossless can be smaller but has less browser support
   const useWebP = typeof OffscreenCanvas !== "undefined";
 
   if (inputFormat && isLossyFormat(inputFormat)) {
@@ -150,16 +152,12 @@ export function embedLSB(
     );
   }
 
-  // Create mask to clear the bits we'll modify
-  // 1 bit: 0xFE (11111110), 2 bits: 0xFC (11111100), 3 bits: 0xF8 (11111000), 4 bits: 0xF0 (11110000)
   const mask = 0xFF << bitDepth;
 
   let bitIndex = 0;
   for (let i = 0; i < imageData.length && bitIndex < messageBits.length; i++) {
-    // Skip alpha channel (every 4th byte, index 3, 7, 11, etc.)
     if (i % 4 === 3) continue;
 
-    // Extract bits for this byte (up to bitDepth bits)
     let bitsToEmbed = 0;
     for (let j = 0; j < bitDepth && bitIndex < messageBits.length; j++) {
       const bit = messageBits[bitIndex] & 1;
@@ -167,7 +165,6 @@ export function embedLSB(
       bitIndex++;
     }
 
-    // Clear the bits we'll modify, then set them
     result[i] = (result[i] & mask) | bitsToEmbed;
   }
 
@@ -189,15 +186,13 @@ export function extractLSB(
   }
 
   const bits = new Uint8Array(bitCount);
-  const maxBits = Math.floor((imageData.length / 4) * 3) * bitDepth; // RGB only
+  const maxBits = Math.floor((imageData.length / 4) * 3) * bitDepth;
   const actualBitCount = Math.min(bitCount, maxBits);
 
   let bitIndex = 0;
   for (let i = 0; i < imageData.length && bitIndex < actualBitCount; i++) {
-    // Skip alpha channel
     if (i % 4 === 3) continue;
 
-    // Extract bits (up to bitDepth bits) from this byte
     for (let j = 0; j < bitDepth && bitIndex < actualBitCount; j++) {
       bits[bitIndex] = (imageData[i] >> j) & 1;
       bitIndex++;
@@ -214,25 +209,19 @@ export function extractLSB(
  */
 export function generateBitSieve(imageData: Uint8Array): Uint8Array {
   const result = new Uint8Array(imageData.length);
-  const width = Math.sqrt(imageData.length / 4); // Approximate width for pattern
+  const width = Math.sqrt(imageData.length / 4);
 
-  // Process as RGBA (4 bytes per pixel)
   for (let i = 0; i < imageData.length; i += 4) {
     const pixelIndex = i / 4;
     const x = pixelIndex % width;
     const y = Math.floor(pixelIndex / width);
 
-    // Extract LSB from R, G, B channels
     const rLSB = imageData[i] & 1;
     const gLSB = imageData[i + 1] & 1;
     const bLSB = imageData[i + 2] & 1;
 
-    // Create high-contrast visualization
-    // Use checkerboard pattern to make LSB=1 stand out more
     const checker = (x + y) % 2 === 0 ? 1 : 0;
 
-    // If LSB=1, make it bright white, if LSB=0 make it dark
-    // Apply checkerboard to create visual texture
     const rValue = rLSB ? (checker ? 255 : 200) : (checker ? 50 : 0);
     const gValue = gLSB ? (checker ? 255 : 200) : (checker ? 50 : 0);
     const bValue = bLSB ? (checker ? 255 : 200) : (checker ? 50 : 0);
@@ -240,7 +229,7 @@ export function generateBitSieve(imageData: Uint8Array): Uint8Array {
     result[i] = rValue;
     result[i + 1] = gValue;
     result[i + 2] = bValue;
-    result[i + 3] = 255; // Fully opaque
+    result[i + 3] = 255;
   }
 
   return result;
@@ -265,7 +254,6 @@ export function generateLSBStats(
   let blueOnes = 0, blueZeros = 0, blueChanged = 0;
 
   for (let i = 0; i < imageData.length; i += 4) {
-    // Skip alpha channel
     const rLSB = imageData[i] & 1;
     const gLSB = imageData[i + 1] & 1;
     const bLSB = imageData[i + 2] & 1;
@@ -277,7 +265,6 @@ export function generateLSBStats(
     if (bLSB) blueOnes++;
     else blueZeros++;
 
-    // Compare with original if provided
     if (originalData && i < originalData.length) {
       const origRLSB = originalData[i] & 1;
       const origGLSB = originalData[i + 1] & 1;
@@ -326,10 +313,10 @@ export function prepareFileHeader(
   const header = new Uint8Array(1 + 1 + fileNameBytes.length + 4);
   const view = new DataView(header.buffer);
 
-  header[0] = 0x55; // Magic byte 'U' for UnderByte
+  header[0] = 0x55;
   header[1] = fileNameBytes.length;
   header.set(fileNameBytes, 2);
-  view.setUint32(2 + fileNameBytes.length, fileSize, true); // little-endian
+  view.setUint32(2 + fileNameBytes.length, fileSize, true);
 
   return header;
 }
@@ -342,19 +329,19 @@ export function parseFileHeader(
   bytes: Uint8Array,
 ): { fileName: string; fileSize: number; payloadOffset: number } | null {
   if (bytes.length < 2 || bytes[0] !== 0x55) {
-    return null; // No magic byte found
+    return null;
   }
 
   const nameLen = bytes[1];
   if (bytes.length < 2 + nameLen + 4) {
-    return null; // Header incomplete
+    return null;
   }
 
   const fileNameBytes = bytes.slice(2, 2 + nameLen);
   const fileName = new TextDecoder().decode(fileNameBytes);
 
   const view = new DataView(bytes.buffer, bytes.byteOffset);
-  const fileSize = view.getUint32(2 + nameLen, true); // little-endian
+  const fileSize = view.getUint32(2 + nameLen, true);
 
   const payloadOffset = 2 + nameLen + 4;
 
@@ -371,6 +358,231 @@ export function calculateBitCapacity(
   height: number,
   bitDepth: number = 1,
 ): number {
-  // RGB only (skip alpha), variable bits per byte
   return Math.floor((width * height * 3 * bitDepth) / 8);
+}
+
+/**
+ * Calculates the embedding capacity of JPEG coefficients
+ * Uses non-zero AC coefficients (index 1-63) for embedding
+ * DC coefficients (index 0) are skipped as they're too visually sensitive
+ * @param coefficients JPEG quantized coefficients
+ * @param useChroma Whether to also use chroma (Cb, Cr) components
+ * @returns Number of bytes that can be hidden
+ */
+export function calculateJpegCoefficientCapacity(
+  coefficients: JPEGQuantizedCoefficients,
+  useChroma: boolean = true,
+): number {
+  let bitCount = 0;
+
+  for (const component of coefficients.components) {
+    if (!useChroma && component.id !== 1) continue;
+
+    for (const row of component.blocks) {
+      for (const block of row) {
+        for (let i = 1; i < 64; i++) {
+          if (block[i] !== 0 && block[i] !== 1 && block[i] !== -1) {
+            bitCount++;
+          }
+        }
+      }
+    }
+  }
+
+  return Math.floor(bitCount / 8);
+}
+
+/**
+ * Embeds message bits into JPEG coefficient LSBs
+ * Uses non-zero AC coefficients with magnitude > 1 for embedding
+ * Modifies coefficients in-place
+ * @param coefficients JPEG quantized coefficients (will be modified)
+ * @param messageBits Bits to embed
+ * @param useChroma Whether to also use chroma (Cb, Cr) components
+ * @returns The modified coefficients
+ */
+export function embedInCoefficients(
+  coefficients: JPEGQuantizedCoefficients,
+  messageBits: Uint8Array,
+  useChroma: boolean = true,
+): JPEGQuantizedCoefficients {
+  let bitIndex = 0;
+
+  for (const component of coefficients.components) {
+    if (bitIndex >= messageBits.length) break;
+
+    if (!useChroma && component.id !== 1) continue;
+
+    for (const row of component.blocks) {
+      if (bitIndex >= messageBits.length) break;
+
+      for (const block of row) {
+        if (bitIndex >= messageBits.length) break;
+
+        for (let i = 1; i < 64 && bitIndex < messageBits.length; i++) {
+          const coeff = block[i];
+
+          if (coeff !== 0 && coeff !== 1 && coeff !== -1) {
+            const messageBit = messageBits[bitIndex] & 1;
+            const coeffLSB = Math.abs(coeff) & 1;
+
+            if (coeffLSB !== messageBit) {
+              if (coeff > 0) {
+                block[i] = messageBit ? (coeff | 1) : (coeff & ~1);
+                if (block[i] === 0 || block[i] === 1) {
+                  block[i] = coeff;
+                  continue;
+                }
+              } else {
+                const absCoeff = -coeff;
+                const newAbs = messageBit ? (absCoeff | 1) : (absCoeff & ~1);
+                if (newAbs === 0 || newAbs === 1) {
+                  continue;
+                }
+                block[i] = -newAbs;
+              }
+            }
+            bitIndex++;
+          }
+        }
+      }
+    }
+  }
+
+  if (bitIndex < messageBits.length) {
+    throw new Error(
+      `Message too large. Capacity: ${bitIndex} bits, Required: ${messageBits.length} bits`,
+    );
+  }
+
+  return coefficients;
+}
+
+/**
+ * Extracts LSB bits from JPEG coefficient data
+ * @param coefficients JPEG quantized coefficients
+ * @param bitCount Number of bits to extract
+ * @param useChroma Whether to also extract from chroma (Cb, Cr) components
+ * @returns Extracted bits
+ */
+export function extractFromCoefficients(
+  coefficients: JPEGQuantizedCoefficients,
+  bitCount: number,
+  useChroma: boolean = true,
+): Uint8Array {
+  const bits = new Uint8Array(bitCount);
+  let bitIndex = 0;
+
+  for (const component of coefficients.components) {
+    if (bitIndex >= bitCount) break;
+
+    if (!useChroma && component.id !== 1) continue;
+
+    for (const row of component.blocks) {
+      if (bitIndex >= bitCount) break;
+
+      for (const block of row) {
+        if (bitIndex >= bitCount) break;
+
+        for (let i = 1; i < 64 && bitIndex < bitCount; i++) {
+          const coeff = block[i];
+
+          if (coeff !== 0 && coeff !== 1 && coeff !== -1) {
+            bits[bitIndex] = Math.abs(coeff) & 1;
+            bitIndex++;
+          }
+        }
+      }
+    }
+  }
+
+  return bits;
+}
+
+/**
+ * Generates LSB statistics for JPEG coefficients
+ * Returns counts of LSB=1 vs LSB=0 per component
+ */
+export function generateJpegCoefficientStats(
+  coefficients: JPEGQuantizedCoefficients,
+): {
+  luminance: { ones: number; zeros: number; total: number };
+  chroma: { ones: number; zeros: number; total: number };
+  total: { ones: number; zeros: number; usable: number };
+} {
+  let lumOnes = 0, lumZeros = 0, lumTotal = 0;
+  let chromaOnes = 0, chromaZeros = 0, chromaTotal = 0;
+
+  for (const component of coefficients.components) {
+    const isLuminance = component.id === 1;
+
+    for (const row of component.blocks) {
+      for (const block of row) {
+        for (let i = 1; i < 64; i++) {
+          const coeff = block[i];
+
+          if (coeff !== 0 && coeff !== 1 && coeff !== -1) {
+            const lsb = Math.abs(coeff) & 1;
+            if (isLuminance) {
+              if (lsb) lumOnes++;
+              else lumZeros++;
+              lumTotal++;
+            } else {
+              if (lsb) chromaOnes++;
+              else chromaZeros++;
+              chromaTotal++;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    luminance: { ones: lumOnes, zeros: lumZeros, total: lumTotal },
+    chroma: { ones: chromaOnes, zeros: chromaZeros, total: chromaTotal },
+    total: {
+      ones: lumOnes + chromaOnes,
+      zeros: lumZeros + chromaZeros,
+      usable: lumTotal + chromaTotal,
+    },
+  };
+}
+
+export async function extractJpegCoefficients(
+  jpegData: Uint8Array,
+): Promise<JPEGQuantizedCoefficients | null> {
+  const coeffs = await Image.extractCoefficients(jpegData, "jpeg");
+  if (coeffs && coeffs.format === "jpeg") {
+    return coeffs as JPEGQuantizedCoefficients;
+  }
+  return null;
+}
+
+export async function encodeJpegFromCoefficients(
+  coefficients: JPEGQuantizedCoefficients,
+): Promise<Uint8Array> {
+  return await Image.encodeFromCoefficients(coefficients, "jpeg");
+}
+
+/**
+ * Deep clones JPEG coefficients to avoid modifying the original
+ */
+export function cloneJpegCoefficients(
+  coefficients: JPEGQuantizedCoefficients,
+): JPEGQuantizedCoefficients {
+  return {
+    ...coefficients,
+    components: coefficients.components.map(
+      (comp: JPEGComponentCoefficients) => ({
+        ...comp,
+        blocks: comp.blocks.map((row: Int32Array[]) =>
+          row.map((block: Int32Array) => new Int32Array(block))
+        ),
+      }),
+    ),
+    quantizationTables: coefficients.quantizationTables.map((table) =>
+      table instanceof Uint8Array ? new Uint8Array(table) : [...table]
+    ),
+  };
 }

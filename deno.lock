@@ -1,7 +1,7 @@
 {
   "version": "5",
   "specifiers": {
-    "jsr:@cross/image@~0.4.1": "0.4.1",
+    "jsr:@cross/image@~0.4.2": "0.4.2",
     "jsr:@deno/esbuild-plugin@^1.2.0": "1.2.0",
     "jsr:@deno/loader@~0.3.2": "0.3.8",
     "jsr:@deno/loader@~0.3.3": "0.3.8",
@@ -47,8 +47,8 @@
     "npm:vite@^7.1.4": "7.2.4_@types+node@24.2.0_picomatch@4.0.3"
   },
   "jsr": {
-    "@cross/image@0.4.1": {
-      "integrity": "5f1b578fe05d7bac26408516e73c23e7a442fe1138c461c24fb1dfc521d952fa"
+    "@cross/image@0.4.2": {
+      "integrity": "710966ded7179d8a5a2dbb864b6d96babcdef9799abb834aae0dea6d03c87ce4"
     },
     "@deno/esbuild-plugin@1.2.0": {
       "integrity": "04ddd0fca9416d8a2866263928a53b9d5ed08dfca064d64504a0aaf9800c709e",
@@ -1097,7 +1097,7 @@
   },
   "workspace": {
     "dependencies": [
-      "jsr:@cross/image@~0.4.1",
+      "jsr:@cross/image@~0.4.2",
       "jsr:@fresh/core@^2.2.0",
       "jsr:@fresh/plugin-vite@^1.0.8",
       "npm:@preact/signals@^2.5.0",
