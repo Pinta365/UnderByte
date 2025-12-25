@@ -333,19 +333,123 @@ export function parseFileHeader(
   }
 
   const nameLen = bytes[1];
-  if (bytes.length < 2 + nameLen + 4) {
+  if (nameLen > MAX_FILENAME_LENGTH || bytes.length < 2 + nameLen + 4) {
     return null;
   }
 
   const fileNameBytes = bytes.slice(2, 2 + nameLen);
-  const fileName = new TextDecoder().decode(fileNameBytes);
+  const fileName = new TextDecoder("utf-8", { fatal: false }).decode(
+    fileNameBytes,
+  );
+
+  if (!fileName || fileName.length === 0) {
+    return null;
+  }
 
   const view = new DataView(bytes.buffer, bytes.byteOffset);
   const fileSize = view.getUint32(2 + nameLen, true);
 
+  if (fileSize > MAX_EMBED_FILE_SIZE || fileSize <= 0) {
+    return null;
+  }
+
   const payloadOffset = 2 + nameLen + 4;
 
-  return { fileName, fileSize, payloadOffset };
+  if (bytes.length < payloadOffset + fileSize) {
+    return null;
+  }
+
+  return {
+    fileName: sanitizeFilename(fileName),
+    fileSize,
+    payloadOffset,
+  };
+}
+
+/**
+ * Maximum file size limits (in bytes)
+ */
+export const MAX_IMAGE_SIZE = 50 * 1024 * 1024; // 50MB
+export const MAX_EMBED_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+export const MAX_MESSAGE_LENGTH = 10 * 1024 * 1024; // 10MB
+export const MAX_IMAGE_DIMENSION = 10000; // 10,000 pixels
+export const MAX_FILENAME_LENGTH = 255;
+
+/**
+ * Validates image dimensions to prevent memory exhaustion
+ */
+export function validateImageDimensions(
+  width: number,
+  height: number,
+): void {
+  if (
+    width <= 0 || height <= 0 || !Number.isInteger(width) ||
+    !Number.isInteger(height)
+  ) {
+    throw new Error("Invalid image dimensions");
+  }
+  if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) {
+    throw new Error(
+      `Image dimensions too large: ${width}x${height} (maximum ${MAX_IMAGE_DIMENSION}x${MAX_IMAGE_DIMENSION})`,
+    );
+  }
+  const pixelCount = width * height;
+  const maxPixels = MAX_IMAGE_DIMENSION * MAX_IMAGE_DIMENSION;
+  if (pixelCount > maxPixels) {
+    throw new Error(
+      `Image size too large: ${pixelCount} pixels (maximum ${maxPixels})`,
+    );
+  }
+}
+
+/**
+ * Sanitizes a filename to prevent path traversal and XSS attacks
+ * Removes path separators, limits length, and validates characters
+ */
+export function sanitizeFilename(filename: string): string {
+  if (!filename || filename.length === 0) {
+    return "file";
+  }
+
+  let sanitized = filename
+    .replace(/[/\\?%*:|"<>]/g, "")
+    .replace(/^\.+/, "")
+    .trim();
+
+  if (sanitized.length === 0) {
+    return "file";
+  }
+
+  if (sanitized.length > MAX_FILENAME_LENGTH) {
+    const ext = sanitized.lastIndexOf(".");
+    if (ext > 0) {
+      const name = sanitized.substring(0, ext);
+      const extension = sanitized.substring(ext);
+      sanitized = name.substring(0, MAX_FILENAME_LENGTH - extension.length) +
+        extension;
+    } else {
+      sanitized = sanitized.substring(0, MAX_FILENAME_LENGTH);
+    }
+  }
+
+  return sanitized;
+}
+
+/**
+ * Validates file size before processing
+ */
+export function validateFileSize(size: number, maxSize: number): void {
+  if (size <= 0) {
+    throw new Error("File size must be positive");
+  }
+  if (size > maxSize) {
+    const maxMB = (maxSize / (1024 * 1024)).toFixed(1);
+    throw new Error(
+      `File too large: ${
+        (size / (1024 * 1024)).toFixed(1)
+      }MB (maximum ${maxMB}MB)`,
+    );
+  }
 }
 
 /**
@@ -358,6 +462,7 @@ export function calculateBitCapacity(
   height: number,
   bitDepth: number = 1,
 ): number {
+  validateImageDimensions(width, height);
   return Math.floor((width * height * 3 * bitDepth) / 8);
 }
 

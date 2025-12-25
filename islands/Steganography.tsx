@@ -17,8 +17,14 @@ import {
   generateJpegCoefficientStats,
   generateLSBStats,
   isLossyFormat,
+  MAX_EMBED_FILE_SIZE,
+  MAX_IMAGE_SIZE,
+  MAX_MESSAGE_LENGTH,
   parseFileHeader,
   prepareFileHeader,
+  sanitizeFilename,
+  validateFileSize,
+  validateImageDimensions,
   xorDecrypt,
   xorEncrypt,
 } from "@/utils/steganography.ts";
@@ -194,6 +200,9 @@ export default function Steganography() {
       error.value = null;
       formatWarning.value = null;
       jpegCoefficientStats.value = null;
+
+      validateFileSize(file.size, MAX_IMAGE_SIZE);
+
       const arrayBuffer = await file.arrayBuffer();
       const imageData = new Uint8Array(arrayBuffer);
 
@@ -221,7 +230,11 @@ export default function Steganography() {
 
       const image = await Image.decode(imageData);
 
-      const fileNameWithoutExt = file.name.replace(/\.[^/.]+$/, "");
+      validateImageDimensions(image.width, image.height);
+
+      const fileNameWithoutExt = sanitizeFilename(
+        file.name.replace(/\.[^/.]+$/, ""),
+      );
 
       const state: ImageState = {
         width: image.width,
@@ -284,6 +297,11 @@ export default function Steganography() {
           return;
         }
         const textBytes = new TextEncoder().encode(message.value);
+        if (textBytes.length > MAX_MESSAGE_LENGTH) {
+          error.value =
+            `Message too long: ${textBytes.length} bytes (maximum ${MAX_MESSAGE_LENGTH} bytes)`;
+          return;
+        }
         const lengthPrefix = new Uint8Array(4);
         const view = new DataView(lengthPrefix.buffer);
         view.setUint32(0, textBytes.length, true);
@@ -295,8 +313,10 @@ export default function Steganography() {
           error.value = "Please select a file";
           return;
         }
+        validateFileSize(fileInput.value.size, MAX_EMBED_FILE_SIZE);
         const fileData = new Uint8Array(await fileInput.value.arrayBuffer());
-        const header = prepareFileHeader(fileInput.value.name, fileData.length);
+        const sanitizedName = sanitizeFilename(fileInput.value.name);
+        const header = prepareFileHeader(sanitizedName, fileData.length);
         dataToEncode = new Uint8Array(header.length + fileData.length);
         dataToEncode.set(header);
         dataToEncode.set(fileData, header.length);
@@ -471,7 +491,11 @@ export default function Steganography() {
       );
       const textLength = view.getUint32(0, true);
 
-      if (textLength > decryptedBytes.length - 4 || textLength > 1000000) {
+      if (
+        textLength > decryptedBytes.length - 4 ||
+        textLength > MAX_MESSAGE_LENGTH ||
+        textLength <= 0
+      ) {
         error.value =
           "Invalid message length. Make sure the settings match the encoding settings.";
         return;
@@ -634,7 +658,9 @@ export default function Steganography() {
 
       const originalFileName = originalImage.value?.originalFileName || "image";
       const extension = finalFormat === "jpeg" ? "jpg" : finalFormat;
-      const downloadFileName = `${originalFileName}_ub.${extension}`;
+      const downloadFileName = sanitizeFilename(
+        `${originalFileName}_ub.${extension}`,
+      );
 
       const mimeTypes: Record<string, string> = {
         png: "image/png",
@@ -1307,7 +1333,7 @@ export default function Steganography() {
 
           {/* Unified Embedding Analysis Panel */}
           {(lsbStats.value || jpegCoefficientStats.value) && (
-            <div class="border border-slate-800 rounded-lg overflow-hidden bg-gradient-to-b from-slate-900/80 to-black/60">
+            <div class="border border-slate-800 rounded-lg overflow-hidden bg-linear-to-b from-slate-900/80 to-black/60">
               {/* Header with method badge */}
               <div class="px-4 py-3 border-b border-slate-800/50 flex items-center justify-between bg-slate-900/50">
                 <h3 class="text-xs uppercase tracking-widest text-slate-400 font-medium">
