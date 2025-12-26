@@ -9,6 +9,7 @@
     "jsr:@fresh/core@2": "2.2.0",
     "jsr:@fresh/core@^2.2.0": "2.2.0",
     "jsr:@fresh/plugin-vite@^1.0.8": "1.0.8",
+    "jsr:@pinta365/steganography@0.1": "0.1.0",
     "jsr:@std/bytes@^1.0.6": "1.0.6",
     "jsr:@std/dotenv@~0.225.5": "0.225.5",
     "jsr:@std/encoding@^1.0.10": "1.0.10",
@@ -106,6 +107,12 @@
         "npm:@prefresh/vite",
         "npm:rollup",
         "npm:vite@^7.1.4"
+      ]
+    },
+    "@pinta365/steganography@0.1.0": {
+      "integrity": "f709a309b2704ee0b45957445015055033253173fe2f688d1885c39d9bd4747c",
+      "dependencies": [
+        "jsr:@cross/image"
       ]
     },
     "@std/bytes@1.0.6": {
@@ -1097,9 +1104,9 @@
   },
   "workspace": {
     "dependencies": [
-      "jsr:@cross/image@~0.4.2",
       "jsr:@fresh/core@^2.2.0",
       "jsr:@fresh/plugin-vite@^1.0.8",
+      "jsr:@pinta365/steganography@0.1",
       "npm:@preact/signals@^2.5.0",
       "npm:@tailwindcss/vite@^4.1.12",
       "npm:preact@^10.27.2",

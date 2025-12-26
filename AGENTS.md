@@ -13,8 +13,7 @@ UnderByte.
 - **`routes/index.tsx`**: Main page route
 - **`routes/_app.tsx`**: App layout wrapper
 - **`main.ts`**: Fresh app initialization
-- **`references/cross-image-package/`**: Local copy of `@cross/image` library
-  for possibly modifications and API
+- **`@cross/image`**: Image processing library (via JSR)
 
 ## Development
 
@@ -62,8 +61,7 @@ deno task start
 ### Key Conventions
 
 - **State Management**: Use `@preact/signals` for all reactive state
-- **Image Processing**: Use `@cross/image` library (local copy in
-  `references/cross-image-package/`)
+- **Image Processing**: Use `@cross/image` library (via JSR)
 - **Format Handling**: Supports both lossless formats (pixel-domain LSB) and
   JPEG (coefficient-domain DCT embedding)
 - **Error Handling**: Display errors via `error` signal, show user-friendly

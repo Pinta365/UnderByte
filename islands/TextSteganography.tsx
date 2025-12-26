@@ -8,7 +8,12 @@ import {
   type VisualizedChar,
   visualizeZWC,
   type ZWCStats,
-} from "@/utils/text_stega.ts";
+} from "@pinta365/steganography";
+import {
+  MAX_IMAGE_SIZE,
+  sanitizeFilename,
+  validateFileSize,
+} from "@pinta365/steganography";
 
 interface Props {
   onBack: () => void;
@@ -16,11 +21,14 @@ interface Props {
 
 export default function TextSteganography({ onBack }: Props) {
   const operationMode = useSignal<"initial" | "encode" | "decode">("initial");
+  const mode = useSignal<"text" | "image">("text");
   const coverText = useSignal("");
   const secretMessage = useSignal("");
   const password = useSignal("");
   const resultText = useSignal("");
   const decodedSecret = useSignal<string | null>(null);
+  const decodedImage = useSignal<string | null>(null);
+  const imageInput = useSignal<File | null>(null);
   const error = useSignal<string | null>(null);
   const isLoading = useSignal(false);
   const loadingMessage = useSignal<string | null>(null);
@@ -28,19 +36,24 @@ export default function TextSteganography({ onBack }: Props) {
   const visualizedChars = useSignal<VisualizedChar[]>([]);
   const zwcStats = useSignal<ZWCStats | null>(null);
   const copySuccess = useSignal(false);
+  const distribute = useSignal<boolean>(false);
 
   function resetSession() {
     operationMode.value = "initial";
+    mode.value = "text";
     coverText.value = "";
     secretMessage.value = "";
     password.value = "";
     resultText.value = "";
     decodedSecret.value = null;
+    decodedImage.value = null;
+    imageInput.value = null;
     error.value = null;
     showDebugView.value = false;
     visualizedChars.value = [];
     zwcStats.value = null;
     copySuccess.value = false;
+    distribute.value = false;
   }
 
   async function handleEncode() {
@@ -49,38 +62,99 @@ export default function TextSteganography({ onBack }: Props) {
       return;
     }
 
-    if (!secretMessage.value.trim()) {
-      error.value = "Please enter a secret message to hide";
-      return;
-    }
-
     if (coverText.value.length > MAX_COVER_LENGTH) {
       error.value = `Cover text too long (max ${MAX_COVER_LENGTH} characters)`;
       return;
     }
 
-    if (secretMessage.value.length > MAX_SECRET_LENGTH) {
-      error.value =
-        `Secret message too long (max ${MAX_SECRET_LENGTH} characters)`;
-      return;
+    let dataToEncode: string;
+
+    if (mode.value === "text") {
+      if (!secretMessage.value.trim()) {
+        error.value = "Please enter a secret message to hide";
+        return;
+      }
+
+      if (secretMessage.value.length > MAX_SECRET_LENGTH) {
+        error.value =
+          `Secret message too long (max ${MAX_SECRET_LENGTH} characters)`;
+        return;
+      }
+
+      dataToEncode = secretMessage.value;
+    } else {
+      if (!imageInput.value) {
+        error.value = "Please select an image file";
+        return;
+      }
+
+      validateFileSize(imageInput.value.size, MAX_IMAGE_SIZE);
+
+      isLoading.value = true;
+      loadingMessage.value = "Reading image file...";
+      error.value = null;
+
+      try {
+        const arrayBuffer = await imageInput.value.arrayBuffer();
+        const bytes = new Uint8Array(arrayBuffer);
+
+        let binaryString = "";
+        const chunkSize = 8192;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          const chunk = bytes.slice(i, i + chunkSize);
+          for (let j = 0; j < chunk.length; j++) {
+            binaryString += String.fromCharCode(chunk[j]);
+          }
+        }
+        const base64 = btoa(binaryString);
+
+        const fileName = sanitizeFilename(imageInput.value.name);
+        const mimeType = imageInput.value.type || "image/png";
+        dataToEncode = `data:${mimeType};filename=${fileName};base64,${base64}`;
+      } catch (err) {
+        error.value = `Failed to read image: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+        isLoading.value = false;
+        loadingMessage.value = null;
+        return;
+      }
     }
 
     isLoading.value = true;
-    loadingMessage.value = "Compressing and encoding...";
+    loadingMessage.value = mode.value === "image"
+      ? "Compressing and encoding image..."
+      : "Compressing and encoding...";
     error.value = null;
 
     try {
       const encoded = await encodeText(
         coverText.value,
-        secretMessage.value,
+        dataToEncode,
         password.value || undefined,
+        distribute.value,
       );
 
-      resultText.value = encoded;
-      zwcStats.value = analyzeZWC(encoded);
+      if (mode.value === "image" && encoded.length > 50000) {
+        resultText.value = "";
+        setTimeout(() => {
+          resultText.value = encoded;
+          setTimeout(() => {
+            zwcStats.value = analyzeZWC(encoded);
+          }, 100);
+        }, 50);
+      } else {
+        resultText.value = encoded;
+        zwcStats.value = analyzeZWC(encoded);
+      }
 
-      if (showDebugView.value) {
+      if (showDebugView.value && encoded.length < 100000) {
         visualizedChars.value = visualizeZWC(encoded);
+      } else if (showDebugView.value) {
+        visualizedChars.value = [{
+          char: "[Debug view disabled for large files - use download instead]",
+          isZWC: false,
+        }];
       }
     } catch (err) {
       error.value = `Encoding failed: ${
@@ -99,10 +173,14 @@ export default function TextSteganography({ onBack }: Props) {
     }
 
     isLoading.value = true;
-    loadingMessage.value = "Decoding...";
+    loadingMessage.value = "Analyzing and decoding...";
     error.value = null;
+    decodedSecret.value = null;
+    decodedImage.value = null;
 
     try {
+      zwcStats.value = analyzeZWC(coverText.value);
+
       const result = await decodeText(
         coverText.value,
         password.value || undefined,
@@ -110,19 +188,84 @@ export default function TextSteganography({ onBack }: Props) {
 
       if (result.secretMessage === null) {
         error.value = "No hidden data found in this text";
+        return;
+      }
+
+      if (result.secretMessage.startsWith("data:image/")) {
+        decodedImage.value = result.secretMessage;
         decodedSecret.value = null;
+      } else if (result.secretMessage.startsWith("data:")) {
+        const base64Match = result.secretMessage.match(/base64,(.+)/);
+        if (base64Match) {
+          try {
+            const base64Data = base64Match[1];
+            const binaryString = atob(base64Data);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            const isImage =
+              (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E &&
+                bytes[3] === 0x47) || // PNG
+              (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) || // JPEG
+              (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) || // GIF
+              (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 &&
+                bytes[3] === 0x46); // WebP/RIFF
+
+            if (isImage) {
+              const mimeMatch = result.secretMessage.match(/data:([^;]+)/);
+              const mimeType = mimeMatch ? mimeMatch[1] : "image/png";
+              decodedImage.value = `data:${mimeType};base64,${base64Data}`;
+              decodedSecret.value = null;
+            } else {
+              decodedSecret.value = result.secretMessage;
+              decodedImage.value = null;
+            }
+          } catch {
+            decodedSecret.value = result.secretMessage;
+            decodedImage.value = null;
+          }
+        } else {
+          decodedSecret.value = result.secretMessage;
+          decodedImage.value = null;
+        }
       } else {
         decodedSecret.value = result.secretMessage;
-        zwcStats.value = analyzeZWC(coverText.value);
+        decodedImage.value = null;
       }
     } catch (err) {
       error.value = `Decoding failed: ${
         err instanceof Error ? err.message : String(err)
       }. Check if the password is correct.`;
       decodedSecret.value = null;
+      decodedImage.value = null;
     } finally {
       isLoading.value = false;
       loadingMessage.value = null;
+    }
+  }
+
+  function handleDownloadImage() {
+    if (!decodedImage.value) return;
+
+    try {
+      const link = document.createElement("a");
+      link.href = decodedImage.value;
+
+      const filenameMatch = decodedImage.value.match(/filename=([^;]+)/);
+      const defaultName = filenameMatch
+        ? filenameMatch[1]
+        : "underbyte_image.png";
+
+      link.download = sanitizeFilename(defaultName);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err) {
+      error.value = `Failed to download image: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
     }
   }
 
@@ -177,9 +320,6 @@ export default function TextSteganography({ onBack }: Props) {
     try {
       const text = await navigator.clipboard.readText();
       coverText.value = text;
-      if (operationMode.value === "decode") {
-        zwcStats.value = analyzeZWC(text);
-      }
     } catch {
       error.value =
         "Unable to read clipboard. Please paste manually using Ctrl+V (Cmd+V on Mac).";
@@ -195,9 +335,6 @@ export default function TextSteganography({ onBack }: Props) {
 
   function handleInputChange(text: string) {
     coverText.value = text;
-    if (operationMode.value === "decode") {
-      zwcStats.value = analyzeZWC(text);
-    }
   }
 
   return (
@@ -228,9 +365,9 @@ export default function TextSteganography({ onBack }: Props) {
               Text Steganography
             </h2>
             <p class="text-slate-300 mb-4 leading-relaxed">
-              Hide secret messages inside normal-looking text using invisible
-              Zero-Width Characters. Your hidden data is compressed with DEFLATE
-              and optionally encrypted with AES-256-CTR.
+              Hide secret messages and images inside normal-looking text using
+              invisible Zero-Width Characters. Your hidden data is compressed
+              with DEFLATE and optionally encrypted with AES-256-CTR.
             </p>
             <div class="space-y-2 text-sm text-slate-400">
               <p>
@@ -250,6 +387,10 @@ export default function TextSteganography({ onBack }: Props) {
                 • <span class="text-emerald-400">Copy-Paste:</span>{" "}
                 Works anywhere text is accepted - emails, messages, documents
               </p>
+              <p>
+                • <span class="text-pink-400">Image Support:</span>{" "}
+                Embed images in text - decode to extract and view them
+              </p>
             </div>
 
             {/* Platform Limitations Warning */}
@@ -263,6 +404,7 @@ export default function TextSteganography({ onBack }: Props) {
                   <p class="text-amber-300/80 leading-relaxed">
                     Many social platforms (Discord, Slack, Twitter/X) strip
                     invisible Unicode characters for security. If sharing fails,
+                    {" "}
                     <strong class="text-amber-200">
                       download as .txt file
                     </strong>{" "}
@@ -293,7 +435,9 @@ export default function TextSteganography({ onBack }: Props) {
                 class="flex-1 px-6 py-4 bg-violet-900/50 text-violet-400 border border-violet-800 rounded hover:bg-violet-900/70 transition-colors"
               >
                 <div class="text-lg font-bold mb-1">Encode</div>
-                <div class="text-xs text-violet-300">Hide text in text</div>
+                <div class="text-xs text-violet-300">
+                  Hide text or images in text
+                </div>
               </button>
               <button
                 type="button"
@@ -343,17 +487,90 @@ export default function TextSteganography({ onBack }: Props) {
 
           <div class="border border-slate-800 rounded-lg p-4 bg-black/50">
             <h3 class="text-xs uppercase tracking-widest text-slate-500 mb-2">
-              Secret Message (Hidden)
+              Data Type
             </h3>
-            <textarea
-              value={secretMessage.value}
-              onInput={(e) => (secretMessage.value = e.currentTarget.value)}
-              placeholder="Enter the secret message to hide..."
-              class="w-full h-32 p-3 bg-slate-950 border border-slate-800 rounded text-violet-400 placeholder-slate-600 focus:outline-none focus:border-violet-800"
-            />
-            <p class="text-xs text-slate-500 mt-2">
-              {secretMessage.value.length} / {MAX_SECRET_LENGTH} characters
-            </p>
+            <div class="flex gap-2 mb-4">
+              <button
+                type="button"
+                onClick={() => mode.value = "text"}
+                class={`px-4 py-2 rounded ${
+                  mode.value === "text"
+                    ? "bg-violet-900/50 text-violet-400 border border-violet-800"
+                    : "bg-slate-900/50 text-slate-400 border border-slate-800"
+                }`}
+              >
+                Text
+              </button>
+              <button
+                type="button"
+                onClick={() => mode.value = "image"}
+                class={`px-4 py-2 rounded ${
+                  mode.value === "image"
+                    ? "bg-violet-900/50 text-violet-400 border border-violet-800"
+                    : "bg-slate-900/50 text-slate-400 border border-slate-800"
+                }`}
+              >
+                Image
+              </button>
+            </div>
+
+            {mode.value === "text"
+              ? (
+                <div>
+                  <h3 class="text-xs uppercase tracking-widest text-slate-500 mb-2">
+                    Secret Message (Hidden)
+                  </h3>
+                  <textarea
+                    value={secretMessage.value}
+                    onInput={(
+                      e,
+                    ) => (secretMessage.value = e.currentTarget.value)}
+                    placeholder="Enter the secret message to hide..."
+                    class="w-full h-32 p-3 bg-slate-950 border border-slate-800 rounded text-violet-400 placeholder-slate-600 focus:outline-none focus:border-violet-800"
+                  />
+                  <p class="text-xs text-slate-500 mt-2">
+                    {secretMessage.value.length} / {MAX_SECRET_LENGTH}{" "}
+                    characters
+                  </p>
+                </div>
+              )
+              : (
+                <div>
+                  <h3 class="text-xs uppercase tracking-widest text-slate-500 mb-2">
+                    Image to Hide
+                  </h3>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => {
+                      imageInput.value = e.currentTarget.files?.[0] || null;
+                    }}
+                    class="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-mono file:bg-violet-950/50 file:text-violet-400 file:cursor-pointer hover:file:bg-violet-900/50"
+                  />
+                  {imageInput.value && (
+                    <div class="mt-3 p-3 bg-slate-950 border border-slate-800 rounded">
+                      <p class="text-xs text-slate-400 mb-2">
+                        {imageInput.value.name}
+                      </p>
+                      <p class="text-xs text-slate-500">
+                        {(imageInput.value.size / 1024).toFixed(2)} KB
+                        {imageInput.value.size > MAX_IMAGE_SIZE && (
+                          <span class="text-red-400 ml-2">
+                            (Too large! Max {MAX_IMAGE_SIZE / (1024 * 1024)}MB)
+                          </span>
+                        )}
+                      </p>
+                      {imageInput.value.type.startsWith("image/") && (
+                        <img
+                          src={URL.createObjectURL(imageInput.value)}
+                          alt="Preview"
+                          class="mt-2 max-w-full max-h-32 rounded border border-slate-800"
+                        />
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
           </div>
 
           <form
@@ -378,6 +595,30 @@ export default function TextSteganography({ onBack }: Props) {
             </p>
           </form>
 
+          <div class="border border-slate-800 rounded-lg p-4 bg-black/50">
+            <h3 class="text-xs uppercase tracking-widest text-slate-500 mb-2">
+              Distribution Mode
+            </h3>
+            <label class="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={distribute.value}
+                onChange={(e) => distribute.value = e.currentTarget.checked}
+                class="w-4 h-4 accent-violet-500"
+              />
+              <div class="flex-1">
+                <span class="text-slate-300">
+                  Spread ZWC throughout text
+                </span>
+                <p class="text-xs text-slate-500 mt-1">
+                  {distribute.value
+                    ? "More stealthy - ZWCs are distributed evenly throughout the cover text instead of appended at the end"
+                    : "Default - ZWCs are appended at the end of the cover text"}
+                </p>
+              </div>
+            </label>
+          </div>
+
           <button
             type="button"
             onClick={handleEncode}
@@ -387,7 +628,11 @@ export default function TextSteganography({ onBack }: Props) {
             {isLoading.value && (
               <div class="animate-spin h-4 w-4 border-2 border-violet-400 border-t-transparent rounded-full" />
             )}
-            {isLoading.value ? "Encoding..." : "Encode Message"}
+            {isLoading.value
+              ? "Encoding..."
+              : mode.value === "image"
+              ? "Encode Image"
+              : "Encode Message"}
           </button>
 
           {resultText.value && (
@@ -459,12 +704,41 @@ export default function TextSteganography({ onBack }: Props) {
                 {!showDebugView.value
                   ? (
                     <div class="relative">
-                      <textarea
-                        readOnly
-                        value={resultText.value}
-                        class="w-full h-32 p-3 bg-slate-950 border border-slate-800 rounded text-slate-300 resize-none focus:outline-none cursor-text"
-                        onClick={(e) => e.currentTarget.select()}
-                      />
+                      {resultText.value.length > 100000
+                        ? (
+                          <div class="p-3 bg-slate-950 border border-slate-800 rounded text-amber-400/90 text-sm">
+                            <div class="flex items-start gap-2 mb-2">
+                              <span class="text-amber-500 text-lg">ℹ</span>
+                              <div>
+                                <p class="font-semibold mb-1">
+                                  Preview not available for large files ({Math
+                                    .round(resultText.value.length / 1024)}KB)
+                                </p>
+                                <p class="text-xs text-amber-300/80">
+                                  Use the{" "}
+                                  <strong class="text-amber-200">
+                                    📋 Copy
+                                  </strong>{" "}
+                                  or{" "}
+                                  <strong class="text-amber-200">
+                                    📥 Download .txt
+                                  </strong>{" "}
+                                  buttons above to access the encoded text. The
+                                  textarea preview is disabled to prevent
+                                  browser slowdown.
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        )
+                        : (
+                          <textarea
+                            readOnly
+                            value={resultText.value}
+                            class="w-full h-32 p-3 bg-slate-950 border border-slate-800 rounded text-slate-300 resize-none focus:outline-none cursor-text"
+                            onClick={(e) => e.currentTarget.select()}
+                          />
+                        )}
                       {/* Hidden data indicator badge */}
                       <div class="absolute bottom-2 right-2 flex items-center gap-1.5 px-2 py-1 bg-violet-900/70 rounded text-[10px] text-violet-300 border border-violet-700/50">
                         <span class="w-1.5 h-1.5 bg-violet-400 rounded-full animate-pulse" />
@@ -620,13 +894,14 @@ export default function TextSteganography({ onBack }: Props) {
                 {zwcStats.value.hasHiddenData
                   ? (
                     <span class="text-emerald-400">
-                      ✓ Hidden data detected ({zwcStats.value.zwcCount} ZWCs)
+                      ✓ Hidden data detected ({zwcStats.value.zwcCount
+                        .toLocaleString()} ZWCs)
                     </span>
                   )
                   : zwcStats.value.zwcCount > 0
                   ? (
                     <span class="text-amber-400">
-                      ⚠ {zwcStats.value.zwcCount}{" "}
+                      ⚠ {zwcStats.value.zwcCount.toLocaleString()}{" "}
                       ZWCs found but no valid UnderByte signature
                     </span>
                   )
@@ -635,6 +910,11 @@ export default function TextSteganography({ onBack }: Props) {
                       No hidden data detected
                     </span>
                   )}
+              </div>
+            )}
+            {!zwcStats.value && coverText.value.length > 0 && (
+              <div class="mt-2 text-xs text-slate-500">
+                Click "Decode Message" to analyze for hidden data
               </div>
             )}
           </div>
@@ -667,6 +947,30 @@ export default function TextSteganography({ onBack }: Props) {
             )}
             {isLoading.value ? "Decoding..." : "Decode Message"}
           </button>
+
+          {decodedImage.value && (
+            <div class="border border-cyan-800 rounded-lg p-4 bg-cyan-950/20">
+              <div class="flex items-center justify-between mb-2">
+                <h3 class="text-xs uppercase tracking-widest text-cyan-500">
+                  Decoded Image
+                </h3>
+                <button
+                  type="button"
+                  onClick={handleDownloadImage}
+                  class="text-xs px-3 py-1.5 rounded border transition-colors font-bold bg-cyan-600 text-white border-cyan-500 hover:bg-cyan-500 shadow-lg shadow-cyan-900/50"
+                >
+                  📥 Download
+                </button>
+              </div>
+              <div class="p-3 bg-slate-950 border border-slate-800 rounded">
+                <img
+                  src={decodedImage.value}
+                  alt="Decoded image"
+                  class="max-w-full max-h-96 rounded border border-slate-800"
+                />
+              </div>
+            </div>
+          )}
 
           {decodedSecret.value !== null && (
             <div class="border border-cyan-800 rounded-lg p-4 bg-cyan-950/20">

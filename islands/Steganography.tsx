@@ -1,21 +1,22 @@
 import { useComputed, useSignal } from "@preact/signals";
 import { useEffect, useRef } from "preact/hooks";
-import { Image, type JPEGQuantizedCoefficients } from "@cross/image";
 import {
-  bitsToBytes,
-  bytesToBits,
   calculateBitCapacity,
   calculateJpegCoefficientCapacity,
   cloneJpegCoefficients,
+  createImage,
+  decodeImage,
   detectImageFormat,
-  embedInCoefficients,
-  embedLSB,
+  embedDataInImage,
+  embedDataInJpegCoefficients,
+  encodeImage,
   encodeJpegFromCoefficients,
-  extractFromCoefficients,
+  extractDataFromImage,
+  extractDataFromJpegCoefficients,
   extractJpegCoefficients,
-  extractLSB,
   generateJpegCoefficientStats,
   generateLSBStats,
+  type Image,
   isLossyFormat,
   MAX_EMBED_FILE_SIZE,
   MAX_IMAGE_SIZE,
@@ -27,7 +28,11 @@ import {
   validateImageDimensions,
   xorDecrypt,
   xorEncrypt,
-} from "@/utils/steganography.ts";
+} from "@pinta365/steganography";
+
+type JPEGCoeffs = NonNullable<
+  Awaited<ReturnType<typeof extractJpegCoefficients>>
+>;
 
 interface ImageState {
   width: number;
@@ -35,8 +40,8 @@ interface ImageState {
   data: Uint8Array;
   originalFormat?: string | null;
   originalFileName?: string;
-  originalImage?: Image; // Store original Image instance to preserve metadata
-  jpegCoefficients?: JPEGQuantizedCoefficients;
+  originalImage?: Image;
+  jpegCoefficients?: JPEGCoeffs;
   rawJpegData?: Uint8Array;
 }
 
@@ -213,7 +218,7 @@ export default function Steganography({ onBack }: Props) {
       const detectedFormat = detectImageFormat(imageData);
       const isLossy = isLossyFormat(detectedFormat);
 
-      let jpegCoefficients: JPEGQuantizedCoefficients | undefined;
+      let jpegCoefficients: JPEGCoeffs | undefined;
 
       if (detectedFormat === "jpeg") {
         loadingMessage.value = "Extracting JPEG coefficients...";
@@ -232,7 +237,7 @@ export default function Steganography({ onBack }: Props) {
         } is a lossy format. Saving as PNG to preserve hidden data.`;
       }
 
-      const image = await Image.decode(imageData);
+      const image = await decodeImage(imageData);
 
       validateImageDimensions(image.width, image.height);
 
@@ -330,8 +335,6 @@ export default function Steganography({ onBack }: Props) {
         ? xorEncrypt(dataToEncode, password.value)
         : dataToEncode;
 
-      const bits = bytesToBits(encrypted);
-
       const requiredBytes = dataToEncode.length;
       if (requiredBytes > bitCapacity.value) {
         error.value =
@@ -346,11 +349,11 @@ export default function Steganography({ onBack }: Props) {
           originalImage.value.jpegCoefficients,
         );
 
-        embedInCoefficients(coeffs, bits, useChroma.value);
+        embedDataInJpegCoefficients(coeffs, encrypted, useChroma.value);
 
         const encodedJpegData = await encodeJpegFromCoefficients(coeffs);
 
-        const encodedImage_ = await Image.decode(encodedJpegData);
+        const encodedImage_ = await decodeImage(encodedJpegData);
 
         encodedImage.value = {
           width: encodedImage_.width,
@@ -370,9 +373,9 @@ export default function Steganography({ onBack }: Props) {
         }). Please use a lossless format like PNG, WebP lossless, or BMP.`;
         return;
       } else {
-        const embeddedData = embedLSB(
+        const embeddedData = embedDataInImage(
           originalImage.value.data,
-          bits,
+          encrypted,
           bitDepth.value,
         );
 
@@ -419,18 +422,17 @@ export default function Steganography({ onBack }: Props) {
       error.value = null;
 
       const decodeFormat = imageToDecode.originalFormat ?? null;
-      let extractedBits: Uint8Array;
+      let encryptedBytes: Uint8Array;
 
       if (decodeFormat === "jpeg" && imageToDecode.jpegCoefficients) {
         const capacity = calculateJpegCoefficientCapacity(
           imageToDecode.jpegCoefficients,
           useChroma.value,
         );
-        const maxBits = capacity * 8;
 
-        extractedBits = extractFromCoefficients(
+        encryptedBytes = extractDataFromJpegCoefficients(
           imageToDecode.jpegCoefficients,
-          maxBits,
+          capacity,
           useChroma.value,
         );
       } else if (
@@ -441,16 +443,16 @@ export default function Steganography({ onBack }: Props) {
         }). Lossy compression destroys pixel-domain embedding data. Please use a lossless format or a JPEG with coefficient extraction.`;
         return;
       } else {
-        const maxBits = Math.floor((imageToDecode.data.length / 4) * 3) *
-          bitDepth.value;
-        extractedBits = extractLSB(
+        const maxDataBytes = Math.floor(
+          (imageToDecode.data.length / 4) * 3 * bitDepth.value / 8,
+        );
+
+        encryptedBytes = extractDataFromImage(
           imageToDecode.data,
-          maxBits,
+          maxDataBytes,
           bitDepth.value,
         );
       }
-
-      const encryptedBytes = bitsToBytes(extractedBits);
 
       const decryptedBytes = password.value
         ? xorDecrypt(encryptedBytes, password.value)
@@ -550,7 +552,7 @@ export default function Steganography({ onBack }: Props) {
           "JPEG output requires coefficient-domain encoding. Please re-encode from a JPEG source.";
         return;
       } else {
-        const image = Image.fromRGBA(
+        const image = createImage(
           encodedImage.value.width,
           encodedImage.value.height,
           encodedImage.value.data,
@@ -578,84 +580,108 @@ export default function Steganography({ onBack }: Props) {
         }
 
         if (finalFormat === "png") {
-          encodedData = await image.encode("png", { compressionLevel: 6 });
+          encodedData = await encodeImage(image, "png", {
+            compressionLevel: 6,
+          });
         } else if (finalFormat === "webp") {
           try {
-            encodedData = await image.encode("webp", {
+            encodedData = await encodeImage(image, "webp", {
               lossless: true,
               quality: 100,
             });
           } catch (err) {
             console.warn("WebP encoding failed, falling back to PNG:", err);
-            encodedData = await image.encode("png", { compressionLevel: 6 });
+            encodedData = await encodeImage(image, "png", {
+              compressionLevel: 6,
+            });
             finalFormat = "png";
             error.value = "WebP encoding failed, saved as PNG instead";
           }
         } else if (finalFormat === "gif") {
           try {
-            encodedData = await image.encode("gif");
+            encodedData = await encodeImage(image, "gif");
           } catch (err) {
             console.warn("GIF encoding failed, falling back to PNG:", err);
-            encodedData = await image.encode("png", { compressionLevel: 6 });
+            encodedData = await encodeImage(image, "png", {
+              compressionLevel: 6,
+            });
             finalFormat = "png";
             error.value = "GIF encoding failed, saved as PNG instead";
           }
         } else if (finalFormat === "bmp") {
           try {
-            encodedData = await image.encode("bmp");
+            encodedData = await encodeImage(image, "bmp");
           } catch (err) {
             console.warn("BMP encoding failed, falling back to PNG:", err);
-            encodedData = await image.encode("png", { compressionLevel: 6 });
+            encodedData = await encodeImage(image, "png", {
+              compressionLevel: 6,
+            });
             finalFormat = "png";
             error.value = "BMP encoding failed, saved as PNG instead";
           }
         } else if (finalFormat === "apng") {
           try {
-            encodedData = await image.encode("apng", { compressionLevel: 6 });
+            encodedData = await encodeImage(image, "apng", {
+              compressionLevel: 6,
+            });
           } catch (err) {
             console.warn("APNG encoding failed, falling back to PNG:", err);
-            encodedData = await image.encode("png", { compressionLevel: 6 });
+            encodedData = await encodeImage(image, "png", {
+              compressionLevel: 6,
+            });
             finalFormat = "png";
             error.value = "APNG encoding failed, saved as PNG instead";
           }
         } else if (finalFormat === "tiff") {
           try {
-            encodedData = await image.encode("tiff", { compression: "lzw" });
+            encodedData = await encodeImage(image, "tiff", {
+              compression: "lzw",
+            });
           } catch (err) {
             console.warn("TIFF encoding failed, falling back to PNG:", err);
-            encodedData = await image.encode("png", { compressionLevel: 6 });
+            encodedData = await encodeImage(image, "png", {
+              compressionLevel: 6,
+            });
             finalFormat = "png";
             error.value = "TIFF encoding failed, saved as PNG instead";
           }
         } else if (finalFormat === "ppm") {
           try {
-            encodedData = await image.encode("ppm");
+            encodedData = await encodeImage(image, "ppm");
           } catch (err) {
             console.warn("PPM encoding failed, falling back to PNG:", err);
-            encodedData = await image.encode("png", { compressionLevel: 6 });
+            encodedData = await encodeImage(image, "png", {
+              compressionLevel: 6,
+            });
             finalFormat = "png";
             error.value = "PPM encoding failed, saved as PNG instead";
           }
         } else if (finalFormat === "pam") {
           try {
-            encodedData = await image.encode("pam");
+            encodedData = await encodeImage(image, "pam");
           } catch (err) {
             console.warn("PAM encoding failed, falling back to PNG:", err);
-            encodedData = await image.encode("png", { compressionLevel: 6 });
+            encodedData = await encodeImage(image, "png", {
+              compressionLevel: 6,
+            });
             finalFormat = "png";
             error.value = "PAM encoding failed, saved as PNG instead";
           }
         } else if (finalFormat === "ico") {
           try {
-            encodedData = await image.encode("ico");
+            encodedData = await encodeImage(image, "ico");
           } catch (err) {
             console.warn("ICO encoding failed, falling back to PNG:", err);
-            encodedData = await image.encode("png", { compressionLevel: 6 });
+            encodedData = await encodeImage(image, "png", {
+              compressionLevel: 6,
+            });
             finalFormat = "png";
             error.value = "ICO encoding failed, saved as PNG instead";
           }
         } else {
-          encodedData = await image.encode("png", { compressionLevel: 6 });
+          encodedData = await encodeImage(image, "png", {
+            compressionLevel: 6,
+          });
           finalFormat = "png";
         }
       }
